@@ -66,7 +66,7 @@ let print_cache () =
   Printf.eprintf "}\n"
 
 let idle_fill = ref false
-exception Cache_modified (* should only be raised if !idle_fill = true *)
+exception Cache_modified of int (* should only be raised if !idle_fill = true *)
 
 let recenter_cache ctr =
    let new_pos = max (ctr - cache_radius) 0 in
@@ -119,7 +119,7 @@ let scale_cache idx ar pic ?tgt_image () =
       let out = hyper_scale dims pic.pb in
       image_cache.pics.(cache_idx) <- 
 	Some { st = Scaled ar; w = fst dims; h = snd dims; pb = out};
-      if !idle_fill then raise Cache_modified;
+      if !idle_fill then raise (Cache_modified idx);
       match tgt_image with
 	  None -> false
 	| Some tgt_image -> tgt_image#set_pixbuf out; false
@@ -140,8 +140,9 @@ let get_cache' cache_idx =
   match image_cache.pics.(cache_idx) with
       Some pic -> pic
     | None -> 
+	let idx = (image_cache.pos+cache_idx) in
 	let pix = 
-          try GdkPixbuf.from_file (get_file (image_cache.pos+cache_idx))
+          try GdkPixbuf.from_file (get_file idx)
           with GdkPixbuf.GdkPixbufError(_,msg) as exn ->
 	    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
 	      ~buttons:GWindow.Buttons.close ~show:true () in
@@ -155,7 +156,7 @@ let get_cache' cache_idx =
 	    pb = pix }
 	in
 	image_cache.pics.(cache_idx) <- Some cb;
-	if !idle_fill then raise Cache_modified;
+	if !idle_fill then raise (Cache_modified idx);
 	cb
 
 let rec scale_cache_pre idx tgt_image () =
@@ -181,15 +182,6 @@ let reset_cache idx =
 
 let image_idx = ref 0
 let last_direction = ref 1
-
-let idle_cache_fill () = 
-  try 
-    idle_fill := true;
-    ignore (scale_cache_pre !image_idx image1 ());
-    Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
-    Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
-    idle_fill := false; false
-  with Cache_modified -> idle_fill := false; true
 
 let rec set_image_from_cache idx tgt_image = 
   let nearest_scale (width, height) pb =
@@ -224,7 +216,18 @@ let is_vert idx =
 let can_twopage idx =
   !opt_twopage && is_vert idx && is_vert (idx + 1)
 
-let show_spread () =
+let rec idle_cache_fill () = 
+  try 
+    idle_fill := true;
+    ignore (scale_cache_pre !image_idx image1 ());
+    Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
+    Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
+    idle_fill := false; false
+  with Cache_modified idx -> 
+    if idx = !image_idx then show_spread ();
+    idle_fill := false; true
+
+and show_spread () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   set_image_from_cache !image_idx image1;
   
