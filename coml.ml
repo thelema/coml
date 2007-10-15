@@ -187,14 +187,10 @@ let idle_cache_fill () =
     idle_fill := true;
     ignore (scale_cache_pre !image_idx image1 ());
     Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
+    Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
     idle_fill := false; false
   with Cache_modified -> idle_fill := false; true
 
-let cache_id idx () = 
-  if abs (idx - !image_idx) < cache_radius then (* don't cache far away from current index *)
-    ignore (get_cache idx);
-  false (* don't requeue this idle activity *)
-    
 let rec set_image_from_cache idx tgt_image = 
   let nearest_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
@@ -204,13 +200,10 @@ let rec set_image_from_cache idx tgt_image =
   let width, height = widget_size ~cap:100 tgt_image in
   let pix = 
     match get_cache idx with
-      | {st=Full; w=w0; h=h0; pb=pix} as pic-> 
+      | {st=Full; w=w0; h=h0; pb=pix} -> 
 	  (* generate simple preview *)
 	  let ar, width, height = scaled_size width height w0 h0 in
-	  let ob = nearest_scale (width,height) pix in
-	  (* when idle, generate and show high-quality preview *)
-	  ignore(Idle.add (scale_cache idx ar pic ~tgt_image));
-	  ob
+	  nearest_scale (width,height) pix
       | {st=Scaled _; w=w0; h=h0; pb=pix} -> 
 	  let _, width, height = scaled_size width height w0 h0 in
 	  if abs(w0 - width) <= 2 && abs(h0-height) <= 2 then
@@ -238,11 +231,10 @@ let show_spread () =
   if can_twopage !image_idx then (
     image2#misc#show ();
     set_image_from_cache (!image_idx+1) image2;
-    ignore(Idle.add (cache_id (!image_idx+(2 * !last_direction))))
   ) else (
     image2#misc#hide ();
   );
-  ignore(Idle.add (cache_id (!image_idx + !last_direction)));
+  ignore(Idle.add idle_cache_fill);
   window#set_title (Printf.sprintf "Image %d of %d"
 		      !image_idx (Array.length Sys.argv - 1))
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
