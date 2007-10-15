@@ -85,7 +85,8 @@ let recenter_cache ctr =
      Array.blit ic 0 ic keep keep;
      Array.fill ic 0 toss cache_null;
    );
-   image_cache.pos <- new_pos
+   image_cache.pos <- new_pos;
+   print_cache ()
 
 let scale (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
@@ -216,18 +217,24 @@ let is_vert idx =
 let can_twopage idx =
   !opt_twopage && is_vert idx && is_vert (idx + 1)
 
+let on_screen idx = idx = !image_idx || (idx = (!image_idx + 1) && can_twopage (!image_idx))
+
 let rec idle_cache_fill () = 
   try 
     idle_fill := true;
+    print_cache ();
+    (* scale the current picture *)
     ignore (scale_cache_pre !image_idx image1 ());
+    (* load all pictures into cache *)
     Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
+    (* scale all pictures in cache *)
     Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
     idle_fill := false; false
   with Cache_modified idx -> 
-    if idx = !image_idx then show_spread ();
+    if on_screen idx then show_spread ();
     idle_fill := false; true
 
-and show_spread () =
+and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   set_image_from_cache !image_idx image1;
   
@@ -238,9 +245,13 @@ and show_spread () =
     image2#misc#hide ();
   );
   ignore(Idle.add idle_cache_fill);
-  window#set_title (Printf.sprintf "Image %d of %d"
-		      !image_idx (Array.length Sys.argv - 1))
+  false
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
+
+and show_spread () = 
+  window#set_title (Printf.sprintf "Image %d of %d"
+		      !image_idx (Array.length Sys.argv - 1));
+  ignore(Idle.add show_spread')
     
 let prev_image () =
   image_idx := !image_idx - (if can_twopage (max (!image_idx-2) 0) then 2 else 1);
