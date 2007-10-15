@@ -65,6 +65,9 @@ let print_cache () =
   Array.iter print_pic image_cache.pics;
   Printf.eprintf "}\n"
 
+let idle_fill = ref false
+exception Cache_modified (* should only be raised if !idle_fill = true *)
+
 let recenter_cache ctr =
    let new_pos = max (ctr - cache_radius) 0 in
    Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;
@@ -116,6 +119,7 @@ let scale_cache idx ar pic ?tgt_image () =
       let out = hyper_scale dims pic.pb in
       image_cache.pics.(cache_idx) <- 
 	Some { st = Scaled ar; w = fst dims; h = snd dims; pb = out};
+      if !idle_fill then raise Cache_modified;
       match tgt_image with
 	  None -> false
 	| Some tgt_image -> tgt_image#set_pixbuf out; false
@@ -132,6 +136,28 @@ let scaled_size wt ht wi hi =
   let w1, h1 = scale (wi, hi) ar in
   ar, w1, h1
 
+let get_cache' cache_idx =
+  match image_cache.pics.(cache_idx) with
+      Some pic -> pic
+    | None -> 
+	let pix = 
+          try GdkPixbuf.from_file (get_file (image_cache.pos+cache_idx))
+          with GdkPixbuf.GdkPixbufError(_,msg) as exn ->
+	    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
+	      ~buttons:GWindow.Buttons.close ~show:true () in
+	    ignore(d#run ());
+	    raise exn
+	in
+	let cb = 
+	  { st = Full;
+	    w = GdkPixbuf.get_width pix; 
+	    h = GdkPixbuf.get_height pix;
+	    pb = pix }
+	in
+	image_cache.pics.(cache_idx) <- Some cb;
+	if !idle_fill then raise Cache_modified;
+	cb
+
 let rec scale_cache_pre idx tgt_image () =
   let w0, h0 = widget_size ~cap:100 tgt_image in
   match get_cache idx with
@@ -146,28 +172,8 @@ and get_cache idx =
    if cache_idx < 0 || cache_idx >= cache_size then (* cache underflow *)
      (recenter_cache idx; get_cache idx)
    else
-     match image_cache.pics.(cache_idx) with
-	 Some pic -> pic
-       | None -> 
-	   let pix = 
-             try GdkPixbuf.from_file (get_file idx)
-             with GdkPixbuf.GdkPixbufError(_,msg) as exn ->
-	       let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
-		 ~buttons:GWindow.Buttons.close ~show:true () in
-	       ignore(d#run ());
-	       raise exn
-	   in
-	   let cb = 
-	     { st = Full;
-	       w = GdkPixbuf.get_width pix; 
-	       h = GdkPixbuf.get_height pix;
-	       pb = pix }
-	   in
-	   image_cache.pics.(cache_idx) <- Some cb;
-	   ignore(Idle.add (scale_cache_pre idx image1));
-	   Printf.eprintf "got: %d\n" idx; print_cache ();
-	   cb 
-	     
+     get_cache' cache_idx
+
 let reset_cache idx = 
   let cache_idx = idx - image_cache.pos in
   if cache_idx < 0 || cache_idx >= cache_size then ()
@@ -176,11 +182,13 @@ let reset_cache idx =
 let image_idx = ref 0
 let last_direction = ref 1
 
-
 let idle_cache_fill () = 
-  let is_scaled pos = match image_cache.pics.(pos) with {st=Scaled _; w=_; h=_; pb=_} -> true | _ -> false in
-  let cache_idx1 = !image_idx - image_cache.pos in
-  if not (is_scaled cache_idx1) then 
+  try 
+    idle_fill := true;
+    ignore (scale_cache_pre !image_idx image1 ());
+    Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
+    idle_fill := false; false
+  with Cache_modified -> idle_fill := false; true
 
 let cache_id idx () = 
   if abs (idx - !image_idx) < cache_radius then (* don't cache far away from current index *)
