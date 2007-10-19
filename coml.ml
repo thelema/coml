@@ -39,10 +39,12 @@ let _ = let newsty = window#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; w
 
 type status = Full | Scaled of float (* keep the scale factor *)
 type pic = {st: status; w: int; h: int; pb: GdkPixbuf.pixbuf}
-type cache = {mutable pos: int; pics: pic option array}
+type file = Failed | Empty | Entry of pic
+type cache = {mutable pos: int; pics: file array}
 let cache_radius = 2
 let cache_size = 2 * cache_radius + 1
-let cache_null = None
+let cache_null = Empty
+let failed_load = { st=Scaled 0.0; w=1; h=1; pb=GdkPixbuf.create 1 1 ()}
 let image_cache = {pos=0; pics=Array.make cache_size cache_null} (* pos == pix.(0).idx when pix.(0) has definition *)
 
 let status_to_string = function 
@@ -61,7 +63,11 @@ let status_to_string = function
 
 let print_cache () = 
   Printf.eprintf "Cache: p=%d; pics={" image_cache.pos;
-  let print_pic = function None -> Printf.eprintf "None-" | Some p -> Printf.eprintf "%s.%d.%d-" (status_to_string p.st) p.w p.h in
+  let print_pic = function 
+      Empty -> Printf.eprintf "None-" 
+    | Failed -> Printf.eprintf "FAIL-" 
+    | Entry p -> Printf.eprintf "%d.%d@%s-" p.w p.h (status_to_string p.st) 
+  in
   Array.iter print_pic image_cache.pics;
   Printf.eprintf "}\n"
 
@@ -119,7 +125,7 @@ let scale_cache idx ar pic ?tgt_image () =
       let dims = scale (pic.w,pic.h) ar in
       let out = hyper_scale dims pic.pb in
       image_cache.pics.(cache_idx) <- 
-	Some { st = Scaled ar; w = fst dims; h = snd dims; pb = out};
+	Entry { st = Scaled ar; w = fst dims; h = snd dims; pb = out};
       if !idle_fill then raise (Cache_modified idx);
       match tgt_image with
 	  None -> false
@@ -139,26 +145,29 @@ let scaled_size wt ht wi hi =
 
 let get_cache' cache_idx =
   match image_cache.pics.(cache_idx) with
-      Some pic -> pic
-    | None -> 
+      Entry cb -> cb
+    | Empty -> 
 	let idx = (image_cache.pos+cache_idx) in
-	let pix = 
-          try GdkPixbuf.from_file (get_file idx)
-          with GdkPixbuf.GdkPixbufError(_,msg) as exn ->
+	( try 
+	    let cb = 
+	      let pix = GdkPixbuf.from_file (get_file idx) in
+	      { st = Full;
+		w = GdkPixbuf.get_width pix; 
+		h = GdkPixbuf.get_height pix;
+		pb = pix }
+	    in
+	    image_cache.pics.(cache_idx) <- Entry cb;
+	    if !idle_fill then raise (Cache_modified idx);
+	    cb
+          with GdkPixbuf.GdkPixbufError(_,msg) ->
 	    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
 	      ~buttons:GWindow.Buttons.close ~show:true () in
 	    ignore(d#run ());
-	    raise exn
-	in
-	let cb = 
-	  { st = Full;
-	    w = GdkPixbuf.get_width pix; 
-	    h = GdkPixbuf.get_height pix;
-	    pb = pix }
-	in
-	image_cache.pics.(cache_idx) <- Some cb;
-	if !idle_fill then raise (Cache_modified idx);
-	cb
+	    image_cache.pics.(cache_idx) <- Failed;
+	    if !idle_fill then raise (Cache_modified idx);
+	    failed_load
+	)
+    | Failed -> failed_load
 
 let rec scale_cache_pre idx tgt_image () =
   let w0, h0 = widget_size ~cap:100 tgt_image in
@@ -182,7 +191,6 @@ let reset_cache idx =
   else image_cache.pics.(cache_idx) <- cache_null
 
 let image_idx = ref 0
-let last_direction = ref 1
 
 let rec set_image_from_cache idx tgt_image = 
   let nearest_scale (width, height) pb =
@@ -229,7 +237,8 @@ let rec idle_cache_fill () =
     Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
     (* scale all pictures in cache *)
     Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
-    idle_fill := false; false
+    idle_fill := false; 
+    false (* we're done filling the cache *)
   with Cache_modified idx -> 
     if on_screen idx then show_spread ();
     idle_fill := false; true
@@ -257,14 +266,12 @@ let prev_image () =
   image_idx := !image_idx - (if can_twopage (max (!image_idx-2) 0) then 2 else 1);
   if !image_idx < 0 then
     image_idx := if !opt_wrap then max_index else 0;
-  last_direction := -1;
   show_spread ()
     
 let next_image () =
   image_idx := !image_idx + (if can_twopage !image_idx then 2 else 1);
   if !image_idx >= max_index then
     image_idx := if !opt_wrap then 0 else max_index;
-  last_direction := 1;
   show_spread ()
     
 let toggle_fullscreen () =
