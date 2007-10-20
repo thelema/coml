@@ -26,7 +26,7 @@ let _  =
 let files = Array.init (Array.length Sys.argv - 1) (fun i -> Sys.argv.(i+1))
 let max_index = Array.length files - 1
 
-let get_file idx = files.(idx)
+let get_page idx = files.(idx)
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:760 ~height:600 ()
 (*let pane = GPack.paned `VERTICAL ~packing:window#add () *)
@@ -46,6 +46,37 @@ let cache_size = 2 * cache_radius + 1
 let cache_null = Empty
 let failed_load = { st=Scaled 0.0; w=1; h=1; pb=GdkPixbuf.create 1 1 ()}
 let image_cache = {pos=0; pics=Array.make cache_size cache_null} (* pos == pix.(0).idx when pix.(0) has definition *)
+
+let get_cache' idx =
+  match image_cache.pics.(idx - image_cache.pos) with
+      Entry cb -> cb
+    | Empty -> raise Not_found
+    | Failed -> failed_load
+
+let idle_fill = ref false
+exception Cache_modified of int (* should only be raised if !idle_fill = true *)
+
+let set_cache idx v =
+  image_cache.pics.(idx - image_cache.pos) <- v;
+  if !idle_fill then raise (Cache_modified idx)
+
+let is_vert idx = 
+  let {w=w0; h=h0} = get_cache' idx in
+  w0 < h0
+
+let has_twopage_match_next idx =
+  let get_ar idx = 
+    let {st=status} = get_cache' idx in
+    match status with Full -> 1.0 | Scaled ar -> ar
+  in
+  try 
+    get_ar idx == get_ar (idx+1)
+  with Not_found -> false
+
+let can_twopage idx =
+  try 
+    !opt_twopage && is_vert idx && idx < max_index && is_vert (idx + 1)
+  with Not_found -> false
 
 let status_to_string = function 
     Full -> "F" 
@@ -71,8 +102,6 @@ let print_cache () =
   Array.iter print_pic image_cache.pics;
   Printf.eprintf "}\n"
 
-let idle_fill = ref false
-exception Cache_modified of int (* should only be raised if !idle_fill = true *)
 
 let recenter_cache ctr =
    let new_pos = max (ctr - cache_radius) 0 in
@@ -111,22 +140,22 @@ let pixbuf_size pix =
   and h = GdkPixbuf.get_height pix in
   (w,h)
 
+let within_cache_range idx =
+  let cache_idx = idx-image_cache.pos in
+  cache_idx >= 0 && cache_idx < cache_size
+
 let scale_cache idx ar pic ?tgt_image () =
   let hyper_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`HYPER pb;
     out_b
   in
-  let cache_idx = idx - image_cache.pos in
-  if cache_idx < 0 || cache_idx >= cache_size then (* cache underflow *)
-    false
+  if not (within_cache_range idx) then false
   else 
     begin
       let dims = scale (pic.w,pic.h) ar in
       let out = hyper_scale dims pic.pb in
-      image_cache.pics.(cache_idx) <- 
-	Entry { st = Scaled ar; w = fst dims; h = snd dims; pb = out};
-      if !idle_fill then raise (Cache_modified idx);
+      set_cache idx ( Entry {st=Scaled ar; w=fst dims; h=snd dims; pb=out} );
       match tgt_image with
 	  None -> false
 	| Some tgt_image -> tgt_image#set_pixbuf out; false
@@ -140,36 +169,41 @@ let scale_factor wt ht wi hi =
 
 let scaled_size wt ht wi hi =
   let ar = scale_factor wt ht wi hi in
+  let ar = max ar 1.0 in
   let w1, h1 = scale (wi, hi) ar in
   ar, w1, h1
 
-let get_cache' cache_idx =
-  match image_cache.pics.(cache_idx) with
-      Entry cb -> cb
-    | Empty -> 
-	let idx = (image_cache.pos+cache_idx) in
-	( try 
-	    let cb = 
-	      let pix = GdkPixbuf.from_file (get_file idx) in
-	      { st = Full;
-		w = GdkPixbuf.get_width pix; 
-		h = GdkPixbuf.get_height pix;
-		pb = pix }
-	    in
-	    image_cache.pics.(cache_idx) <- Entry cb;
-	    if !idle_fill then raise (Cache_modified idx);
-	    cb
-          with GdkPixbuf.GdkPixbufError(_,msg) ->
-	    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
-	      ~buttons:GWindow.Buttons.close ~show:true () in
-	    ignore(d#run ());
-	    image_cache.pics.(cache_idx) <- Failed;
-	    if !idle_fill then raise (Cache_modified idx);
-	    failed_load
-	)
-    | Failed -> failed_load
+let load_cache idx = 
+  try 
+    let cb = 
+      let pix = GdkPixbuf.from_file (get_page idx) in
+      { st = Full;
+	w = GdkPixbuf.get_width pix; 
+	h = GdkPixbuf.get_height pix;
+	pb = pix }
+    in
+    set_cache idx (Entry cb);
+    cb
+  with GdkPixbuf.GdkPixbufError(_,msg) ->
+    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
+      ~buttons:GWindow.Buttons.close ~show:true () in
+    set_cache idx Failed;
+    ignore(d#run ());
+    failed_load
+	
+let rec get_cache idx = 
+(*Printf.eprintf "get_c %d\n" idx; *)
+  if not (within_cache_range idx) then (* cache underflow *)
+    (recenter_cache idx; get_cache idx)
+  else
+    try get_cache' idx 
+    with Not_found -> load_cache idx
 
-let rec scale_cache_pre idx tgt_image () =
+let load_cache_if_empty idx =
+  ignore(try get_cache' idx
+	 with Not_found -> load_cache idx)
+
+let scale_cache_pre idx tgt_image () =
   let w0, h0 = widget_size ~cap:100 tgt_image in
   match get_cache idx with
     | {st=Scaled _; w=_; h=_; pb=_} -> false
@@ -177,18 +211,9 @@ let rec scale_cache_pre idx tgt_image () =
 	let ar = scale_factor w0 h0 w1 h1 in
 	scale_cache idx ar pic ()
 
-and get_cache idx = 
-(*Printf.eprintf "get_c %d\n" idx; *)
-   let cache_idx = idx-image_cache.pos in
-   if cache_idx < 0 || cache_idx >= cache_size then (* cache underflow *)
-     (recenter_cache idx; get_cache idx)
-   else
-     get_cache' cache_idx
-
 let reset_cache idx = 
-  let cache_idx = idx - image_cache.pos in
-  if cache_idx < 0 || cache_idx >= cache_size then ()
-  else image_cache.pics.(cache_idx) <- cache_null
+  if within_cache_range idx then
+    set_cache idx cache_null
 
 let image_idx = ref 0
 
@@ -218,13 +243,6 @@ let rec set_image_from_cache idx tgt_image =
   in
   tgt_image#set_pixbuf pix
     
-let is_vert idx = 
-  let {st=_; w=w0; h=h0; pb=_} = get_cache idx in
-  w0 < h0
-
-let can_twopage idx =
-  !opt_twopage && is_vert idx && is_vert (idx + 1)
-
 let on_screen idx = idx = !image_idx || (idx = (!image_idx + 1) && can_twopage (!image_idx))
 
 let rec idle_cache_fill () = 
@@ -234,9 +252,13 @@ let rec idle_cache_fill () =
     (* scale the current picture *)
     ignore (scale_cache_pre !image_idx image1 ());
     (* load all pictures into cache *)
-    Array.iteri (fun i _ -> ignore (get_cache' i)) image_cache.pics;
+    for idx = image_cache.pos to image_cache.pos+cache_size do
+      ignore (load_cache_if_empty idx);
+    done;
     (* scale all pictures in cache *)
-    Array.iteri (fun i _ -> ignore (scale_cache_pre (i+image_cache.pos) image1 () )) image_cache.pics;
+    for idx = image_cache.pos to image_cache.pos+cache_size do
+      ignore (scale_cache_pre idx image1 ());
+    done;
     idle_fill := false; 
     false (* we're done filling the cache *)
   with Cache_modified idx -> 
