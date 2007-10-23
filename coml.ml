@@ -55,14 +55,14 @@ let pixbuf_size pix =
   and h = GdkPixbuf.get_height pix in
   (w,h)
 
-type status = Full | Scaled 
-type pic = {st: status; pb: GdkPixbuf.pixbuf}
+type pic = {scaled: GdkPixbuf.pixbuf option; full: GdkPixbuf.pixbuf}
 type file = Failed | Empty | Entry of pic
 type cache = {mutable pos: int; pics: file array}
 let cache_radius = ref 4
 let cache_size () = 2 * !cache_radius + 1
 let cache_null = Empty
-let failed_load = { st=Scaled; pb=GdkPixbuf.create 1 1 ()}
+let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); 
+		    full = GdkPixbuf.create 1 1 ()}
 let image_cache = { pos=0; pics=Array.make (cache_size ()) cache_null; } 
 let cache_last_idx () = min (image_cache.pos + (cache_size ()) - 1) !max_index
 
@@ -85,7 +85,7 @@ let set_cache idx v =
   if !idle_fill then raise (Cache_modified idx)
 
 let is_vert idx = 
-  let (w0,h0) = pixbuf_size (get_cache' idx).pb in
+  let (w0,h0) = pixbuf_size (get_cache' idx).full in
   w0 < h0
 
 let can_twopage idx =
@@ -93,14 +93,14 @@ let can_twopage idx =
     opt.twopage && is_vert idx && idx < !max_index && is_vert (idx + 1)
   with Not_found -> false
 
-let status_to_string = function | Full -> "F" | Scaled -> "S" 
+let status_to_string entry = match entry.scaled with Some _ -> "S" | None -> "F"
 
 let print_cache () = 
   Printf.eprintf "Cache: p=%d; pics={" image_cache.pos;
   let print_pic = function 
       Empty -> Printf.eprintf "None-" 
     | Failed -> Printf.eprintf "FAIL-" 
-    | Entry p -> Printf.eprintf "%s-" (status_to_string p.st) 
+    | Entry p -> Printf.eprintf "%s-" (status_to_string p) 
   in
   Array.iter print_pic image_cache.pics;
   Printf.eprintf "}\n"
@@ -140,9 +140,8 @@ let widget_size ?cap widget =
 let rec load_cache idx = 
   try 
 Printf.eprintf "L:%d=" idx;
-    let cb = { st = Full; pb = GdkPixbuf.from_file (get_page idx)} in
-Printf.eprintf "%dx%d  
-" (fst (pixbuf_size cb.pb)) (snd (pixbuf_size cb.pb));
+    let cb = { scaled=None; full = GdkPixbuf.from_file (get_page idx)} in
+Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));
     set_cache idx (Entry cb)
   with GdkPixbuf.GdkPixbufError(_,msg) ->
 (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
@@ -176,8 +175,8 @@ let scale_factor (wt,ht) (wi, hi) =
   let ar_t = wt /. ht and ar_i = wi /. hi in
   if ar_t > ar_i then ht /. hi else wt /. wi
 
-let size_diff (w1,h1) (w2,h2) = abs(w1-w2) < 2 && abs(h1-h2) < 2
-let has_size pb size = size_diff (pixbuf_size pb) size
+let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
+let lacks_size size pb = size_diff (pixbuf_size pb) size
 
 let scaled_size ~target ~image =
   let ar = match opt.scale with
@@ -211,24 +210,24 @@ let rec scale_cache_idle idx size () =
       out_b
     in
     let pic = get_cache' idx in
-    match pic.st with
-	Full ->
-	  let out = hyper_scale size pic.pb in
-	  set_cache idx ( Entry {st=Scaled; pb=out} )
-      | Scaled -> 
-	  load_cache idx;
-	  let out = hyper_scale size (get_cache' idx).pb in
-	  set_cache idx ( Entry {st=Scaled; pb=out} )
+    let out = hyper_scale size pic.full in
+    set_cache idx ( Entry {pic with scaled = Some out} )
+  in
+  let lacks_size idx size =
+    match (get_cache' idx).scaled with
+	None -> true
+      | Some sc -> lacks_size size sc
   in
   try 
 Printf.eprintf "IS:%d->%dx%d" idx (fst size) (snd size);
-    if not (has_size (get_cache' idx).pb size) then (
+    if lacks_size idx size then (
       scale_cache idx size; 
       if on_screen idx then show_spread ();
-      let is_size = has_size (get_cache' idx).pb size in
-if is_size then Printf.eprintf "ok \n" else Printf.eprintf "FAIL \n";
+      if lacks_size idx size 
+        then Printf.eprintf "ok\n" 
+        else Printf.eprintf "FAIL\n";
     ) else (
-      Printf.eprintf "skip ";
+      Printf.eprintf "skip\n";
     );
     false
   with Not_found -> Printf.eprintf "NFOUND "; false
@@ -236,26 +235,26 @@ if is_size then Printf.eprintf "ok \n" else Printf.eprintf "FAIL \n";
 and scale_cache_pre idx =
   if can_twopage idx then
     let pic = get_cache idx and pic2 = get_cache (idx+1) in
-    match pic.st,pic2.st with
-	Full,Full -> 
-	  let cur_size = pixbuf_size pic.pb 
-	  and cur_size2 = pixbuf_size pic2.pb in
+    match pic.scaled,pic2.scaled with
+	None, None -> 
+	  let cur_size = pixbuf_size pic.full 
+	  and cur_size2 = pixbuf_size pic2.full in
 (*	  let ts1,ts2 = scaled_pair !container_size cur_size cur_size2 in*)
 	  let ts1 = scaled_size (widget_size image1) cur_size
 	  and ts2 = scaled_size (widget_size image2) cur_size2 in
 	  (*Printf.eprintf "twopage scale %dx%d and %dx%d in %dx%d  idx %d,%d by %f\n" w1 h1 w2 h2 w0 h0 idx (idx+1) tar; *)
 	  ignore(Idle.add (scale_cache_idle idx ts1));
 	  ignore(Idle.add (scale_cache_idle (idx+1) ts2))
-      | Scaled, _ | _, Scaled -> ()
+      | Some _, _ | _, Some _ -> ()
   else
     let pic = get_cache idx in
-    match pic.st with
-	Full -> 
-	  let cur_size = pixbuf_size pic.pb in
+    match pic.scaled with
+	None -> 
+	  let cur_size = pixbuf_size pic.full in
 	  let target_size = scaled_size !container_size cur_size in
 Printf.eprintf "PS:%d->%dx%d " idx (fst target_size) (snd target_size);
 	  ignore(Idle.add (scale_cache_idle idx target_size))
-      | Scaled -> ()
+      | Some _ -> ()
 
 and set_image_from_cache idx tgt_image = 
   let nearest_scale (width, height) pb =
@@ -265,17 +264,17 @@ and set_image_from_cache idx tgt_image =
   in
   (* generate simple preview *)
   let pic = get_cache idx in
-  match pic.st with
-      Scaled -> 
-	tgt_image#set_pixbuf pic.pb;
-    | Full -> 
+  match pic.scaled with
+      Some spb -> 
+	tgt_image#set_pixbuf spb;
+    | None -> 
 	let target = widget_size ~cap:100 tgt_image in
-	let scl_size = scaled_size ~target ~image:(pixbuf_size pic.pb) in
-	if not (has_size pic.pb scl_size) then (
+	let scl_size = scaled_size ~target ~image:(pixbuf_size pic.full) in
+	if lacks_size scl_size pic.full then (
 	  Printf.eprintf "SIC:%d to %dx%d tgt %dx%d \n" idx (fst scl_size) (snd scl_size) (fst target) (snd target);
 	  ignore(Idle.add (scale_cache_idle idx scl_size));
 	);
-	tgt_image#set_pixbuf (nearest_scale scl_size pic.pb)
+	tgt_image#set_pixbuf (nearest_scale scl_size pic.full)
 
 and idle_cache_fill () = 
   try 
@@ -370,8 +369,8 @@ let zoom ar_val ar_func =
 		    Fit -> Fixed_AR ar_val 
 		  | Fixed_AR ar -> ar_func ar);
   let rescale idx = 
-    let cur_size = pixbuf_size (get_cache idx).pb in
-    let target_size = scale cur_size ar_val in
+    let cur_size = pixbuf_size (get_cache idx).full in
+    let target_size = scaled_size cur_size (widget_size image1) in
     Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);
     ignore(Idle.add (scale_cache_idle idx target_size))
   in
