@@ -242,22 +242,16 @@ Printf.eprintf "->%dx%d" (fst size) (snd size);
   with Not_found -> Printf.eprintf "%d NFOUND " idx; false
     
 and scale_cache_pre idx =
-  let check_scale idx =
-    let pic = get_cache idx in
-    let full_size = pixbuf_size pic.full in
-    let target_size = scaled_size (!target_size) full_size in
-Printf.eprintf "PS:%d->%dx%d " idx (fst target_size) (snd target_size);
-    match pic.scaled with
-	None -> 
+  let pic = get_cache idx in
+  let full_size = pixbuf_size pic.full in
+  let target_size = scaled_size (!target_size) full_size in
+  Printf.eprintf "PS:%d->%dx%d " idx (fst target_size) (snd target_size);
+  match pic.scaled with
+      None -> 
+	ignore(Idle.add (scale_cache_idle idx target_size))
+    | Some spb -> 
+	if lacks_size' target_size spb then
 	  ignore(Idle.add (scale_cache_idle idx target_size))
-      | Some spb -> 
-	  if lacks_size' target_size spb then
-	    ignore(Idle.add (scale_cache_idle idx target_size))
-  in
-  if can_twopage idx then
-    (check_scale idx; check_scale (idx+1);)
-  else
-    check_scale idx
 
 and display idx tgt_image = 
   let nearest_scale (width, height) pb =
