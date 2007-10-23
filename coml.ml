@@ -50,9 +50,12 @@ let spread = GPack.hbox ~packing:spread_ebox#add ()
 let _ = spread#set_homogeneous false; spread#set_spacing 0
 let image2 = GMisc.image ~packing:spread#add ()
 let image1 = GMisc.image ~packing:spread#add ()
-let bbox = GPack.button_box `HORIZONTAL ~packing:pane#pack2 ~layout:`END ()
+let footer = GPack.hbox ~packing:pane#pack2 ()
+let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
+let sep = GMisc.separator `VERTICAL ~packing:footer#pack ()
+let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 
-let _ = let newsty = window#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; window#misc#set_style newsty (* set the background black *)
+(*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
 let widget_size ?cap widget = 
   let {Gtk.x=x0; y=y0; width=width; height=height} = 
@@ -145,6 +148,7 @@ let scale (wi,hi) ar =
 
 let rec load_cache idx = 
   try 
+note#set_label (Printf.sprintf "Loading img %d" idx);
 (*Printf.eprintf "L:%d=" idx;*)
     let cb = { scaled=None; full = GdkPixbuf.from_file (get_page idx)} in
 (*Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));*)
@@ -245,13 +249,15 @@ and scale_cache_pre idx =
   let pic = get_cache idx in
   let full_size = pixbuf_size pic.full in
   let target_size = scaled_size (!target_size) full_size in
-  Printf.eprintf "PS:%d->%dx%d " idx (fst target_size) (snd target_size);
-  match pic.scaled with
-      None -> 
-	ignore(Idle.add (scale_cache_idle idx target_size))
-    | Some spb -> 
-	if lacks_size' target_size spb then
-	  ignore(Idle.add (scale_cache_idle idx target_size))
+  Printf.eprintf "PS:%d" idx;
+  let do_scale = match pic.scaled with
+    | None -> true | Some spb -> lacks_size' target_size spb
+  in
+  if do_scale then (
+    Printf.eprintf "->%dx%d "  (fst target_size) (snd target_size);
+    ignore(Idle.add (scale_cache_idle idx target_size))
+  ) else
+    Printf.eprintf "skip "
 
 and display idx tgt_image = 
   let nearest_scale (width, height) pb =
@@ -263,18 +269,12 @@ and display idx tgt_image =
   let pic = get_cache idx in
   target_size := widget_size ~cap:400 tgt_image;
   let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
-  (match pic.scaled with
-       Some spb -> 
-	 let wp,hp = pixbuf_size spb
-	 and wi,hi = !target_size in
-	 Printf.eprintf "D:s%d at %dx%d image %dx%d\n" idx wp hp wi hi;
-	 tgt_image#set_pixbuf spb;
-     | None -> 
-	 tgt_image#set_pixbuf (nearest_scale scl_size pic.full)
-  );
-  
-  if lacks_size' scl_size (opt_default pic.scaled pic.full) then (
-    Printf.eprintf "RESCALE:%d to %dx%d tgt %dx%d \n" idx (fst scl_size) (snd scl_size) (fst !target_size) (snd !target_size);
+  let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
+  tgt_image#set_pixbuf pb;
+  if lacks_size' scl_size pb then (
+    if pic.scaled <> None then Printf.eprintf "RE";
+    let w0,h0 = pixbuf_size pb and w1,h1 = scl_size and wt, ht = !target_size in
+    Printf.eprintf "SCALE:%d %dx%d to %dx%d tgt %dx%d \n" idx w0 h0 w1 h1 wt ht;
     ignore(Idle.add (scale_cache_idle idx scl_size));
   );
 
