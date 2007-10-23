@@ -412,10 +412,7 @@ let main () =
   if Array.length files > 1 then begin
     let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
     and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
-    ignore (prev#c	  let ar1 = scale_factor w0 h0 w1 h1
-	  and ar2 = scale_factor w0 h0 w2 h2 in
-	  let ar = min ar1 ar2 in
-onnect#clicked ~callback:prev_image);
+    ignore (prev#connect#clicked ~callback:prev_image);
     ignore (next#connect#clicked ~callback:next_image)
   end;		   
   let close = GButton.button ~stock:`CLOSE ~packing:bbox#pack () in
