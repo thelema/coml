@@ -122,6 +122,7 @@ let print_cache () =
   Printf.eprintf "}\n"
 
 let recenter_cache ctr =
+note#set_label (Printf.sprintf "Recentering cache to %d" ctr);
    let new_pos = max (ctr - !cache_radius) 0 in
    Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;
 (*   print_cache ();*)
@@ -216,6 +217,7 @@ let reset_cache idx =
     set_cache idx cache_null
 
 let rec scale_cache_idle idx size () = 
+note#set_label (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size));
   let scale_cache idx size =
     let hyper_scale (width, height) pb =
       let out_b = GdkPixbuf.create width height () in
@@ -260,6 +262,7 @@ and scale_cache_pre idx =
     Printf.eprintf "skip "
 
 and display idx tgt_image = 
+note#set_label (Printf.sprintf "Displaying img %d" idx);
   let nearest_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
@@ -361,7 +364,7 @@ let toggle_manga () =
 
 let go_to_page_dialog () =
   let _ = GWindow.dialog ~parent:window ~title:"Go to page"  () in
-  ()
+  () (* FIXME COMPLETE THIS *)
 
 let zoom ar_val ar_func = 
   opt.scale <-( match opt.scale with
