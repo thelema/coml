@@ -54,7 +54,6 @@ let footer = GPack.hbox ~packing:pane#pack2 ()
 let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
 let sep = GMisc.separator `VERTICAL ~packing:footer#pack ()
 let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
-
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
 let widget_size ?cap widget = 
@@ -69,13 +68,13 @@ let pixbuf_size pix =
   and h = GdkPixbuf.get_height pix in
   (w,h)
 
-let target_size = ref (widget_size ~cap:400 image1)
+let target_size = ref (widget_size spread)
 
 type pic = {scaled: GdkPixbuf.pixbuf option; full: GdkPixbuf.pixbuf}
 type file = Failed | Empty | Entry of pic
-type cache = {mutable pos: int; pics: file array}
-let cache_radius = ref 2
-let cache_size () = 2 * !cache_radius + 1
+type cache = {mutable pos: int; mutable pics: file array}
+let cache_past = ref 1 and cache_future = ref 1
+let cache_size () = !cache_past + !cache_future + 1
 let cache_null = Empty
 let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); 
 		    full = GdkPixbuf.create 1 1 ()}
@@ -123,24 +122,23 @@ let print_cache () =
 
 let recenter_cache ctr =
 note#set_label (Printf.sprintf "Recentering cache to %d" ctr);
-   let new_pos = max (ctr - !cache_radius) 0 in
+   let new_pos = max (ctr - !cache_past) 0 in
    Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;
-(*   print_cache ();*)
-   
-   let toss = min (abs (new_pos - image_cache.pos)) (cache_size ()) in
-   let keep = (cache_size ()) - toss in
+   print_cache ();
    let ic = image_cache.pics in
-   if new_pos > image_cache.pos then (
-(*     Printf.eprintf "FW - blit ic %d ic %d %d; fill ic %d %d;\n" toss 0 keep keep toss; *)
-     Array.blit ic toss ic 0 keep;
-     Array.fill ic keep toss cache_null;
-   ) else (
-(*     Printf.eprintf "BW - blit ic %d ic %d %d; fill ic %d %d;\n" 0 keep keep 0 toss;*)
-     Array.blit ic 0 ic keep keep;
-     Array.fill ic 0 toss cache_null;
-   );
-   image_cache.pos <- new_pos
-(*   print_cache ()*)
+   let ic2 = Array.make (cache_size ()) cache_null in
+   let new_size = Array.length ic2 and old_size = Array.length ic in
+   let old_start, old_end = image_cache.pos, image_cache.pos + (old_size - 1)
+   and new_start, new_end = new_pos, new_pos + new_size - 1 in
+   let overlap_start = max old_start new_start
+   and overlap_end = min old_end new_end in
+   if overlap_start <= overlap_end then
+     Array.blit ic (overlap_start-old_start) ic2 (overlap_start-new_start)
+       (overlap_end - overlap_start + 1);
+
+   image_cache.pics <- ic2;
+   image_cache.pos <- new_pos;
+   print_cache ()
 
 let scale (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
@@ -248,21 +246,24 @@ Printf.eprintf "->%dx%d" (fst size) (snd size);
   with Not_found -> Printf.eprintf "%d NFOUND " idx; false
     
 and scale_cache_pre idx =
-  let pic = get_cache idx in
-  let full_size = pixbuf_size pic.full in
-  let target_size = scaled_size (!target_size) full_size in
-  Printf.eprintf "PS:%d" idx;
-  let do_scale = match pic.scaled with
-    | None -> true | Some spb -> lacks_size' target_size spb
-  in
-  if do_scale then (
-    Printf.eprintf "->%dx%d "  (fst target_size) (snd target_size);
-    ignore(Idle.add (scale_cache_idle idx target_size))
-  ) else
-    Printf.eprintf "skip "
+  try 
+    let pic = get_cache' idx in
+    let full_size = pixbuf_size pic.full in
+    let scl_size = scaled_size (!target_size) full_size in
+    Printf.eprintf "PS:%d" idx;
+    let do_scale = match pic.scaled with
+      | None -> true | Some spb -> lacks_size' scl_size spb
+    in
+    if do_scale then (
+      let w0,h0 = pixbuf_size (opt_default pic.scaled pic.full)
+      and w1,h1 = scl_size and wt, ht = !target_size in
+      Printf.eprintf "is:%dx%d to:%dx%d tgt:%dx%d \n" w0 h0 w1 h1 wt ht;
+      ignore(Idle.add (scale_cache_idle idx scl_size))
+    ) else
+      Printf.eprintf "skip "
+  with Not_found -> ()
 
 and display idx tgt_image = 
-note#set_label (Printf.sprintf "Displaying img %d" idx);
   let nearest_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
@@ -270,14 +271,16 @@ note#set_label (Printf.sprintf "Displaying img %d" idx);
   in
   (* generate simple preview *)
   let pic = get_cache idx in
-  target_size := widget_size ~cap:400 tgt_image;
-  let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
+  let scl_size = scaled_size ~target:(widget_size ~cap:50 spread) 
+    ~image:(pixbuf_size pic.full) in
   let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
   tgt_image#set_pixbuf pb;
+  target_size := widget_size ~cap:50 spread;
+  let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
   if lacks_size' scl_size pb then (
     if pic.scaled <> None then Printf.eprintf "RE";
     let w0,h0 = pixbuf_size pb and w1,h1 = scl_size and wt, ht = !target_size in
-    Printf.eprintf "SCALE:%d %dx%d to %dx%d tgt %dx%d \n" idx w0 h0 w1 h1 wt ht;
+    Printf.eprintf "SCALE:%d is:%dx%d to:%dx%d tgt:%dx%d \n" idx w0 h0 w1 h1 wt ht;
     ignore(Idle.add (scale_cache_idle idx scl_size));
   );
 
@@ -285,11 +288,6 @@ and idle_cache_fill () =
   try 
     idle_fill := true;
 (*    print_cache ();*)
-    ignore (get_cache (!image_idx + 1));
-    if can_twopage !image_idx then (
-      ignore (get_cache (!image_idx + 2));
-      ignore (get_cache (!image_idx + 3));
-    );
     (* load all pictures into cache *)
     for idx = image_cache.pos to cache_last_idx () do
 (*Printf.eprintf "LC: %d," idx;*)
@@ -311,12 +309,12 @@ and idle_cache_fill () =
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   if can_twopage !image_idx then (
+note#set_label (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
     display !image_idx image1;
     display (!image_idx+1) image2;
-    window#set_title (Printf.sprintf "Image %d,%d of %d"
-		      !image_idx (!image_idx+1) (Array.length Sys.argv - 1));
   ) else (
+note#set_label (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_idx));
     image2#misc#hide ();
     display !image_idx image1;
   );
@@ -325,8 +323,6 @@ and show_spread' () =
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
 and show_spread () = 
-  window#set_title (Printf.sprintf "Image %d of %d"
-		      !image_idx !max_index);
   ignore(Idle.add show_spread')
     
 let prev_image () =
@@ -350,12 +346,15 @@ let toggle_fullscreen () =
     opt.fullscreen <- true;
     window#fullscreen ();
    );
-  spread#misc#set_size_request ~width:(Gdk.Screen.width ()) ~height:(Gdk.Screen.height ()) ();
+(*  spread#misc#set_size_request ~width:(Gdk.Screen.width ()) ~height:(Gdk.Screen.height ()) (); *)
   show_spread ()
 
 let toggle_twopage () =
   opt.twopage <- not opt.twopage;
-  (* TODO: increase cache size if twopage *)
+  (* increase cache size if twopage *)
+  cache_past := if opt.twopage then 2 else 1;
+  cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
+  recenter_cache !image_idx;
   show_spread ()
 
 let toggle_manga () =
@@ -402,7 +401,6 @@ let resized event =
   and image_height = GdkEvent.Configure.height event in
   
   Printf.eprintf "RESIZE: %dx%d\n" image_width image_height;
-  spread#misc#set_size_request ();
   show_spread ();
   true
   
@@ -421,7 +419,7 @@ let main () =
   ignore (window#connect#destroy ~callback:Main.quit);
   ignore (window#event#connect#key_press ~callback:handle_key);
 (*  ignore (window#event#connect#configure ~callback:resized);*)
-  ignore (spread_ebox#event#connect#configure ~callback:resized);
+  ignore (pane#event#connect#configure ~callback:resized);
   show_spread ();
   window#show ();
   Main.main ()
