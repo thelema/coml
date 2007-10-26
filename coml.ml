@@ -35,9 +35,11 @@ let _ =
   end
 
 type book = { path : string; files: string array }
-let books = ref []
+let books = Stack.create ()
 
-let push_books path files = books := {path=path; files=files}::!books
+let push_books path files = 
+  if Array.length files > 0 then 
+    Stack.push {path=path; files=files} books
 
 let is_archive file = List.exists (Filename.check_suffix file) ["rar";"zip"]
 
@@ -51,19 +53,21 @@ let rec build_books = function
       let td = Filename.concat Filename.temp_dir_name "coml" in
       (* extract archive to td *)
       build_books (td::t)
+  | h :: t when not (Sys.file_exists h) -> build_books t
   | h :: t as l -> 
       let p1 = Filename.dirname h in 
       let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
       push_books p1 (Array.of_list (List.map Filename.basename b1));
       build_books rest
+let _ = build_books (Array.to_list Sys.argv)
 
-let files = Array.init (Array.length Sys.argv - 1) (fun i -> Sys.argv.(i+1))
-let max_index = ref (Array.length files - 1)
+let current_book = Stack.pop books
+let max_index = ref (Array.length current_book.files - 1)
 
-let get_page idx = files.(idx)
+let get_page idx = Filename.concat current_book.path current_book.files.(idx)
 let remove_file idx = 
   if idx <> !max_index then 
-    Array.blit files (idx+1) files idx (!max_index-idx);
+    Array.blit current_book.files (idx+1) current_book.files idx (!max_index-idx);
   decr max_index
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
@@ -143,8 +147,10 @@ let print_cache () =
   Array.iter print_pic image_cache.pics;
   Printf.eprintf "}\n"
 
+let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
+
 let recenter_cache ctr =
-note#set_label (Printf.sprintf "Recentering cache to %d" ctr);
+set_status (Printf.sprintf "Recentering cache to %d" ctr);
    let new_pos = max (ctr - !cache_past) 0 in
    Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;
    print_cache ();
@@ -170,7 +176,7 @@ let scale (wi,hi) ar =
 
 let rec load_cache idx = 
   try 
-note#set_label (Printf.sprintf "Loading img %d" idx);
+set_status (Printf.sprintf "Loading img %d" idx);
 (*Printf.eprintf "L:%d=" idx;*)
     let cb = { scaled=None; full = GdkPixbuf.from_file (get_page idx)} in
 (*Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));*)
@@ -238,7 +244,7 @@ let reset_cache idx =
     set_cache idx cache_null
 
 let rec scale_cache_idle idx size () = 
-note#set_label (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size));
+set_status (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size));
   let scale_cache idx size =
     let hyper_scale (width, height) pb =
       let out_b = GdkPixbuf.create width height () in
@@ -298,6 +304,7 @@ and display idx tgt_image =
     ~image:(pixbuf_size pic.full) in
   let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
   tgt_image#set_pixbuf pb;
+  ignore (Glib.Main.iteration true);
   target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
   if lacks_size' scl_size pb then (
@@ -311,6 +318,7 @@ and idle_cache_fill () =
   try 
     idle_fill := true;
 (*    print_cache ();*)
+    
     (* load all pictures into cache *)
     for idx = image_cache.pos to cache_last_idx () do
 (*Printf.eprintf "LC: %d," idx;*)
@@ -332,16 +340,15 @@ and idle_cache_fill () =
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   if can_twopage !image_idx then (
-note#set_label (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
+set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
     display !image_idx image1;
     display (!image_idx+1) image2;
   ) else (
-note#set_label (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_idx));
+set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_idx));
     image2#misc#hide ();
     display !image_idx image1;
   );
-  ignore(Idle.add idle_cache_fill);
   false
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
@@ -349,17 +356,21 @@ and show_spread () =
   ignore(Idle.add show_spread')
     
 let prev_image () =
+set_status (Printf.sprintf "Going back one page @ %d" !image_idx);
   image_idx := !image_idx - (if can_twopage (max (!image_idx-2) 0) then 2 else 1);
   if !image_idx < 0 then
     image_idx := if opt.wrap then !max_index else 0;
   recenter_cache !image_idx;
+  ignore(Idle.add idle_cache_fill);
   show_spread ()
     
 let next_image () =
+set_status (Printf.sprintf "Going forward one page @ %d" !image_idx);
   image_idx := !image_idx + (if can_twopage !image_idx then 2 else 1);
   if !image_idx >= !max_index then
     image_idx := if opt.wrap then 0 else !max_index;
   recenter_cache !image_idx;
+  ignore(Idle.add idle_cache_fill);
   show_spread ()
     
 let toggle_fullscreen () =
@@ -380,6 +391,7 @@ let toggle_twopage () =
   cache_past := if opt.twopage then 2 else 1;
   cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
   recenter_cache !image_idx;
+  ignore(Idle.add idle_cache_fill);
   show_spread ()
 
 let toggle_manga () =
