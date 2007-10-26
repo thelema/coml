@@ -329,12 +329,14 @@ let prev_image () =
   image_idx := !image_idx - (if can_twopage (max (!image_idx-2) 0) then 2 else 1);
   if !image_idx < 0 then
     image_idx := if opt.wrap then !max_index else 0;
+  recenter_cache !image_idx;
   show_spread ()
     
 let next_image () =
   image_idx := !image_idx + (if can_twopage !image_idx then 2 else 1);
   if !image_idx >= !max_index then
     image_idx := if opt.wrap then 0 else !max_index;
+  recenter_cache !image_idx;
   show_spread ()
     
 let toggle_fullscreen () =
