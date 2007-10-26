@@ -185,6 +185,7 @@ set_status (Printf.sprintf "Loading img %d" idx);
 (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
       ~buttons:GWindow.Buttons.close ~show:true () in
     ignore(d#run ()); *)
+    set_status (Printf.sprintf "Failed to load %s" (get_page idx));
     if opt.remove_failed then
       (remove_file idx; load_cache idx)
     else
@@ -344,10 +345,13 @@ set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
     display !image_idx image1;
     display (!image_idx+1) image2;
+    window#set_title (Printf.sprintf "Image %d,%d of %d"
+		      !image_idx (!image_idx+1) !max_index);
   ) else (
 set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_idx));
     image2#misc#hide ();
     display !image_idx image1;
+    window#set_title (Printf.sprintf "Image %d of %d" !image_idx !max_index);
   );
   false
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
@@ -355,23 +359,31 @@ set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_
 and show_spread () = 
   ignore(Idle.add show_spread')
     
-let prev_image () =
-set_status (Printf.sprintf "Going back one page @ %d" !image_idx);
-  image_idx := !image_idx - (if can_twopage (max (!image_idx-2) 0) then 2 else 1);
-  if !image_idx < 0 then
-    image_idx := if opt.wrap then !max_index else 0;
+let new_pos idx = 
+  image_idx := idx;
   recenter_cache !image_idx;
   ignore(Idle.add idle_cache_fill);
   show_spread ()
+
+let first_image () = new_pos 0
+
+let last_image () = new_pos !max_index
+
+let prev_image () =
+  let movement = if can_twopage (max (!image_idx-2) 0) then 2 else 1 in
+set_status (Printf.sprintf "Going back %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
+
+  if !image_idx - movement < 0 then
+    if opt.wrap then last_image () else first_image ()
+  else new_pos (!image_idx - movement)
     
 let next_image () =
-set_status (Printf.sprintf "Going forward one page @ %d" !image_idx);
-  image_idx := !image_idx + (if can_twopage !image_idx then 2 else 1);
-  if !image_idx >= !max_index then
-    image_idx := if opt.wrap then 0 else !max_index;
-  recenter_cache !image_idx;
-  ignore(Idle.add idle_cache_fill);
-  show_spread ()
+  let movement = if can_twopage !image_idx then 2 else 1 in
+set_status (Printf.sprintf "Going forward %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
+  
+  if !image_idx + movement >= !max_index then
+    if opt.wrap then first_image () else last_image()
+  else new_pos (!image_idx + movement)
     
 let toggle_fullscreen () =
   if opt.fullscreen then (
