@@ -34,6 +34,29 @@ let _ =
     exit 1
   end
 
+type book = { path : string; files: string array }
+let books = ref []
+
+let push_books path files = books := {path=path; files=files}::!books
+
+let is_archive file = List.exists (Filename.check_suffix file) ["rar";"zip"]
+
+let rec build_books = function 
+    [] -> () 
+  | h :: t when Sys.is_directory h ->
+      let files = Sys.readdir h in
+      push_books h files;
+      build_books t
+  | h :: t when is_archive h ->
+      let td = Filename.concat Filename.temp_dir_name "coml" in
+      (* extract archive to td *)
+      build_books (td::t)
+  | h :: t as l -> 
+      let p1 = Filename.dirname h in 
+      let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
+      push_books p1 (Array.of_list (List.map Filename.basename b1));
+      build_books rest
+
 let files = Array.init (Array.length Sys.argv - 1) (fun i -> Sys.argv.(i+1))
 let max_index = ref (Array.length files - 1)
 
@@ -271,11 +294,11 @@ and display idx tgt_image =
   in
   (* generate simple preview *)
   let pic = get_cache idx in
-  let scl_size = scaled_size ~target:(widget_size ~cap:50 spread) 
+  let scl_size = scaled_size ~target:(widget_size ~cap:200 spread) 
     ~image:(pixbuf_size pic.full) in
   let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
   tgt_image#set_pixbuf pb;
-  target_size := widget_size ~cap:50 spread;
+  target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
   if lacks_size' scl_size pb then (
     if pic.scaled <> None then Printf.eprintf "RE";
@@ -409,12 +432,11 @@ let resized event =
 
 let main () =
 
-  if Array.length files > 1 then begin
-    let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
-    and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
-    ignore (prev#connect#clicked ~callback:prev_image);
-    ignore (next#connect#clicked ~callback:next_image)
-  end;		   
+  let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
+  and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
+  ignore (prev#connect#clicked ~callback:prev_image);
+  ignore (next#connect#clicked ~callback:next_image);
+
   let close = GButton.button ~stock:`CLOSE ~packing:bbox#pack () in
   ignore (close#connect#clicked ~callback:Main.quit);
 
