@@ -276,7 +276,9 @@ Printf.eprintf "->%dx%d" (fst size) (snd size);
     );
     false
   with Not_found -> Printf.eprintf "%d NFOUND " idx; false
-    
+
+and idle_scale idx scl_size = 
+  ignore (Idle.add ~prio:300 (scale_cache_idle idx scl_size))
 and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
@@ -290,7 +292,7 @@ and scale_cache_pre idx =
       let w0,h0 = pixbuf_size (opt_default pic.scaled pic.full)
       and w1,h1 = scl_size and wt, ht = !target_size in
       Printf.eprintf "is:%dx%d to:%dx%d tgt:%dx%d \n" w0 h0 w1 h1 wt ht;
-      ignore(Idle.add (scale_cache_idle idx scl_size))
+      idle_scale idx scl_size
     ) else
       Printf.eprintf "skip "
   with Not_found -> ()
@@ -314,7 +316,7 @@ and display idx tgt_image =
     if pic.scaled <> None then Printf.eprintf "RE";
     let w0,h0 = pixbuf_size pb and w1,h1 = scl_size and wt, ht = !target_size in
     Printf.eprintf "SCALE:%d is:%dx%d to:%dx%d tgt:%dx%d \n" idx w0 h0 w1 h1 wt ht;
-    ignore(Idle.add (scale_cache_idle idx scl_size));
+    idle_scale idx scl_size
   );
 
 and idle_cache_fill () = 
@@ -359,19 +361,19 @@ set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
 and show_spread () = 
-  ignore(Idle.add show_spread')
+  ignore(Idle.add ~prio:115 show_spread')
     
 let new_pos idx = 
   if !image_idx <> idx then begin 
     image_idx := idx;
     recenter_cache !image_idx;
-    ignore(Idle.add idle_cache_fill);
+    ignore(Idle.add ~prio:250 idle_cache_fill);
     show_spread ()
   end
 
-let first_image () = new_pos 0
+let first_image () = set_status "At beginning of book"; new_pos 0
 
-let last_image () = new_pos (if can_twopage (!max_index-1) then !max_index - 1 else !max_index)
+let last_image () = set_status "At end of book"; new_pos (if can_twopage (!max_index-1) then !max_index - 1 else !max_index)
 
 let prev_image () =
   let movement = if can_twopage (max (!image_idx-2) 0) then 2 else 1 in
@@ -407,7 +409,7 @@ let toggle_twopage () =
   cache_past := if opt.twopage then 2 else 1;
   cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
   recenter_cache !image_idx;
-  ignore(Idle.add idle_cache_fill);
+  ignore(Idle.add ~prio:250 idle_cache_fill);
   show_spread ()
 
 let toggle_manga () =
@@ -426,7 +428,7 @@ let zoom ar_val ar_func =
     let cur_size = pixbuf_size (get_cache idx).full in
     let target_size = scaled_size cur_size (widget_size image1) in
     Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);
-    ignore(Idle.add (scale_cache_idle idx target_size))
+    idle_scale idx target_size
   in
   rescale !image_idx; 
   if can_twopage !image_idx then rescale (!image_idx+1)
