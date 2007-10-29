@@ -246,6 +246,9 @@ let reset_cache idx =
   if within_cache_range idx then
     set_cache idx cache_null
 
+let icf_task = ref None
+let show_task = ref None
+
 let rec scale_cache_idle idx size () = 
 set_status (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size));
   let scale_cache idx size =
@@ -322,7 +325,7 @@ and display idx tgt_image =
 and idle_cache_fill () = 
   try 
     idle_fill := true;
-(*    print_cache ();*)
+    set_status "ICF started";
     
     (* load all pictures into cache *)
     for idx = image_cache.pos to cache_last_idx () do
@@ -336,10 +339,11 @@ and idle_cache_fill () =
     done;
     idle_fill := false; 
 (*Printf.eprintf "Done filling\n";*)
+    icf_task := None;
     false (* we're done filling the cache *)
   with Cache_modified idx -> 
     idle_fill := false; 
-    if on_screen idx then (show_spread (); false (*because another idle_fill job will be queued by show_spread *))
+    if on_screen idx then (show_spread (); true)
     else true
 
 and show_spread' () =
@@ -357,17 +361,27 @@ set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_
     display !image_idx image1;
     window#set_title (Printf.sprintf "Image %d of %d" !image_idx !max_index);
   );
+  show_task := None;
   false
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
 and show_spread () = 
-  ignore(Idle.add ~prio:115 show_spread')
-    
+  match !show_task with
+      None -> 
+	show_task := Some (Idle.add ~prio:115 show_spread')
+    | Some _ -> ()
+
+let start_icf () =
+  match !icf_task with
+      None -> 
+	icf_task := Some (Idle.add ~prio:250 idle_cache_fill);
+    | Some _ -> ()
+
 let new_pos idx = 
   if !image_idx <> idx then begin 
     image_idx := idx;
     recenter_cache !image_idx;
-    ignore(Idle.add ~prio:250 idle_cache_fill);
+    start_icf ();
     show_spread ()
   end
 
@@ -409,7 +423,7 @@ let toggle_twopage () =
   cache_past := if opt.twopage then 2 else 1;
   cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
   recenter_cache !image_idx;
-  ignore(Idle.add ~prio:250 idle_cache_fill);
+  start_icf ();
   show_spread ()
 
 let toggle_manga () =
