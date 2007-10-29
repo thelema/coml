@@ -22,10 +22,12 @@ type options = { mutable wrap: bool;
 		 mutable manga: bool;
 		 mutable remove_failed: bool; 
 		 mutable scale: scaling;
+		 mutable rar_exe: string;
 	       }
 let opt = { wrap = false; fullscreen = false; 
 	    twopage = false; manga = true;
 	    remove_failed = true; scale = Fit;
+	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
 let _ = 
@@ -360,14 +362,16 @@ and show_spread () =
   ignore(Idle.add show_spread')
     
 let new_pos idx = 
-  image_idx := idx;
-  recenter_cache !image_idx;
-  ignore(Idle.add idle_cache_fill);
-  show_spread ()
+  if !image_idx <> idx then begin 
+    image_idx := idx;
+    recenter_cache !image_idx;
+    ignore(Idle.add idle_cache_fill);
+    show_spread ()
+  end
 
 let first_image () = new_pos 0
 
-let last_image () = new_pos !max_index
+let last_image () = new_pos (if can_twopage (!max_index-1) then !max_index - 1 else !max_index)
 
 let prev_image () =
   let movement = if can_twopage (max (!image_idx-2) 0) then 2 else 1 in
