@@ -41,9 +41,17 @@ let books = Stack.create ()
 
 let push_books path files = 
   if Array.length files > 0 then 
+    Array.sort Pervasives.compare files;
     Stack.push {path=path; files=files} books
 
-let is_archive file = List.exists (Filename.check_suffix file) ["rar";"zip"]
+let archive_type fn = 
+  let suf s = Filename.check_suffix fn s in 
+  if suf "rar" then `Rar 
+  else if suf "zip" then `Zip 
+  else if suf "7z" then `Sev_zip 
+  else `Not_archive
+
+let is_archive file = match archive_type file with `Not_archive -> false | _ -> true
 
 let rec build_books = function 
     [] -> () 
@@ -54,6 +62,8 @@ let rec build_books = function
   | h :: t when is_archive h ->
       let td = Filename.concat Filename.temp_dir_name "coml" in
       (* extract archive to td *)
+      
+      (* on quit, remove the extracted archive *)
       build_books (td::t)
   | h :: t when not (Sys.file_exists h) -> build_books t
   | h :: t as l -> 
@@ -75,13 +85,15 @@ let remove_file idx =
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
 let spread_ebox = GBin.event_box ~packing:pane#add1 ()
-let spread = GPack.hbox ~packing:spread_ebox#add ()
+let spread = GPack.hbox ~packing:spread_ebox#add ~width:9999 ~height:9999 ()
 let _ = spread#set_homogeneous false; spread#set_spacing 0
 let image2 = GMisc.image ~packing:spread#add ()
 let image1 = GMisc.image ~packing:spread#add ()
 let footer = GPack.hbox ~packing:pane#pack2 ()
+let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
+let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
 let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
-let sep = GMisc.separator `VERTICAL ~packing:footer#pack ()
+let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
 let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
@@ -281,7 +293,7 @@ Printf.eprintf "->%dx%d" (fst size) (snd size);
   with Not_found -> Printf.eprintf "%d NFOUND " idx; false
 
 and idle_scale idx scl_size = 
-  ignore (Idle.add ~prio:300 (scale_cache_idle idx scl_size))
+  ignore (Idle.add ~prio:150 (scale_cache_idle idx scl_size))
 and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
@@ -348,15 +360,16 @@ and idle_cache_fill () =
 
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
+  file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
   if can_twopage !image_idx then (
-set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
+    set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
     display !image_idx image1;
     display (!image_idx+1) image2;
     window#set_title (Printf.sprintf "Image %d,%d of %d"
 		      !image_idx (!image_idx+1) !max_index);
   ) else (
-set_status (Printf.sprintf "Displaying img %d - %s" !image_idx (get_page !image_idx));
+    set_status (Printf.sprintf "Displaying img %d" !image_idx);
     image2#misc#hide ();
     display !image_idx image1;
     window#set_title (Printf.sprintf "Image %d of %d" !image_idx !max_index);
@@ -490,6 +503,7 @@ let main () =
   ignore (pane#event#connect#configure ~callback:resized);
   show_spread ();
   window#show ();
+  start_icf ();
   Main.main ()
     
 let _ = Printexc.print main ()
