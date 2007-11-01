@@ -24,6 +24,7 @@ type options = { mutable wrap: bool;
 		 mutable scale: scaling;
 		 mutable rar_exe: string;
 	       }
+
 let opt = { wrap = false; fullscreen = false; 
 	    twopage = false; manga = true;
 	    remove_failed = true; scale = Fit;
@@ -84,9 +85,10 @@ let remove_file idx =
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
-let spread_ebox = GBin.event_box ~packing:pane#add1 ()
-let spread = GPack.hbox ~packing:spread_ebox#add ~width:9999 ~height:9999 ()
-let _ = spread#set_homogeneous false; spread#set_spacing 0
+let scroller = GBin.scrolled_window ~packing:pane#add1 ()
+let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
+let spread = GPack.layout ~packing:scroller#add ~width:9999 ~height:9999 ()
+(*let _ = spread#set_homogeneous false; spread#set_spacing 0 *)
 let image2 = GMisc.image ~packing:spread#add ()
 let image1 = GMisc.image ~packing:spread#add ()
 let footer = GPack.hbox ~packing:pane#pack2 ()
@@ -169,7 +171,7 @@ let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; no
 let recenter_cache ctr =
 set_status (Printf.sprintf "Recentering cache to %d" ctr);
    let new_pos = max (ctr - !cache_past) 0 in
-   Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;
+(*   Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;*)
    print_cache ();
    let ic = image_cache.pics in
    let ic2 = Array.make (cache_size ()) cache_null in
@@ -277,23 +279,23 @@ set_status (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size))
     set_cache idx ( Entry {pic with scaled = Some out} )
   in
   try 
-Printf.eprintf "IS:%d" idx;
+(*Printf.eprintf "IS:%d" idx; *)
     if lacks_size size idx then (
-Printf.eprintf "->%dx%d" (fst size) (snd size);
+(*Printf.eprintf "->%dx%d" (fst size) (snd size);*)
       scale_cache idx size; 
       if on_screen idx then show_spread ();
-      if lacks_size size idx
+(*      if lacks_size size idx
         then 
 	  let sw,sh = match (get_cache' idx).scaled with None -> 0,0 | Some pb -> pixbuf_size pb
 	  and tw,th = size in
 	  Printf.eprintf "FAIL %dx%d <> %dx%d " sw sh tw th;
         else 
-	  Printf.eprintf "ok  "
+	  Printf.eprintf "ok  " *)
     ) else (
-      Printf.eprintf "skip  ";
+(*      Printf.eprintf "skip  "; *)
     );
     false
-  with Not_found -> Printf.eprintf "%d NFOUND " idx; false
+  with Not_found -> (*Printf.eprintf "%d NFOUND " idx;*) false
 
 and idle_scale idx scl_size = 
   ignore (Idle.add ~prio:150 (scale_cache_idle idx scl_size))
@@ -301,17 +303,11 @@ and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
     let scl_size = scaled_size (!target_size) (full_size pic) in
-    Printf.eprintf "PS:%d" idx;
     let do_scale = match pic.scaled with
       | None -> true | Some spb -> lacks_size' scl_size spb
     in
-    if do_scale then (
-      let w0,h0 = cur_size pic
-      and w1,h1 = scl_size and wt, ht = !target_size in
-      Printf.eprintf "is:%dx%d to:%dx%d tgt:%dx%d \n" w0 h0 w1 h1 wt ht;
+    if do_scale then
       idle_scale idx scl_size
-    ) else
-      Printf.eprintf "skip "
   with Not_found -> ()
 
 and display idx tgt_image = 
@@ -329,12 +325,8 @@ and display idx tgt_image =
   ignore (Glib.Main.iteration true);
   target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in
-  if lacks_size' scl_size pb then (
-    if pic.scaled <> None then Printf.eprintf "RE";
-    let w0,h0 = pixbuf_size pb and w1,h1 = scl_size and wt, ht = !target_size in
-    Printf.eprintf "SCALE:%d is:%dx%d to:%dx%d tgt:%dx%d \n" idx w0 h0 w1 h1 wt ht;
+  if lacks_size' scl_size pb then
     idle_scale idx scl_size
-  );
 
 and idle_cache_fill () = 
   try 
@@ -343,16 +335,13 @@ and idle_cache_fill () =
     
     (* load all pictures into cache *)
     for idx = image_cache.pos to cache_last_idx () do
-(*Printf.eprintf "LC: %d," idx;*)
       ignore (load_cache_if_empty idx);
     done;
     (* scale all pictures in cache *)
     for idx = image_cache.pos to cache_last_idx () do
-(*Printf.eprintf "SC: %d," idx;*)
       ignore (scale_cache_pre idx);
     done;
     idle_fill := false; 
-(*Printf.eprintf "Done filling\n";*)
     icf_task := None;
     false (* we're done filling the cache *)
   with Cache_modified idx -> 
@@ -363,11 +352,19 @@ and idle_cache_fill () =
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
+  let max_w, max_h = widget_size scroller in
+Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
   if can_twopage !image_idx then (
     set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
-    display !image_idx image1;
-    display (!image_idx+1) image2;
+    if opt.manga then begin
+      display (!image_idx+1) image1;      
+      display !image_idx image2;
+    end else begin
+      display !image_idx image1;
+      display (!image_idx+1) image2;
+    end;
+    spread#move image2#coerce (fst (cur_size (get_cache !image_idx))) 0;
     window#set_title (Printf.sprintf "Image %d,%d of %d"
 		      !image_idx (!image_idx+1) !max_index);
   ) else (
@@ -383,7 +380,7 @@ and show_spread' () =
 and show_spread () = 
   match !show_task with
       None -> 
-	show_task := Some (Idle.add ~prio:115 show_spread')
+	show_task := Some (Idle.add ~prio:145 show_spread')
     | Some _ -> ()
 
 let start_icf () =
@@ -443,7 +440,8 @@ let toggle_twopage () =
 
 let toggle_manga () =
   opt.manga <- not opt.manga;
-  spread#reorder_child image2#coerce (if opt.manga then 0 else 1)
+  show_spread()
+(*  spread#reorder_child image2#coerce (if opt.manga then 0 else 1)*)
 
 let go_to_page_dialog () =
   let _ = GWindow.dialog ~parent:window ~title:"Go to page"  () in
@@ -455,38 +453,41 @@ let zoom ar_val ar_func =
 		  | Fixed_AR ar -> ar_func ar);
   let rescale idx = 
     let pic = get_cache idx in
-    let target_size = scaled_size (full_size pic) (widget_size image1) in
-    Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);
+    let target_size = scaled_size (full_size pic) (widget_size spread) in
+(*    Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);*)
     idle_scale idx target_size
   in
   rescale !image_idx; 
   if can_twopage !image_idx then rescale (!image_idx+1)
+
+let zoom_out () = zoom 0.95 (fun ar -> Fixed_AR (ar *. 0.95))
+and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Fixed_AR (ar /. 0.95))
+and toggle_zoom () = zoom 1.0 (fun _ -> Fit)
   
 open GdkKeysyms
 
+let acts = [(_q, Main.quit);
+	    (_Left, prev_image); (_Up, prev_image); (_BackSpace, prev_image);
+	    (_Right, next_image); (_Down, next_image); (_space, next_image);
+	    (_f, toggle_fullscreen); (_t, toggle_twopage);
+	    (_m, toggle_manga); (_z, toggle_zoom);
+	    (_minus, zoom_out); (_plus, zoom_in);
+	    (_l, (fun () -> load_cache !image_idx));
+	    (_w, (fun () -> opt.wrap <- not opt.wrap));
+	   ]
+
 let handle_key event =
   let kv = GdkEvent.Key.keyval event in
-  if kv = _q then Main.quit () else
-  if kv = _Left or kv = _Down or kv = _BackSpace then prev_image() else
-  if kv = _Right or kv = _Up or kv = _space then next_image() else
-  if kv = _f then toggle_fullscreen () else
-  if kv = _t then toggle_twopage () else
-  if kv = _m then toggle_manga () else
-  if kv = _w then opt.wrap <- not opt.wrap else
-  if kv = _l then load_cache !image_idx else
-  if kv = _z then zoom 1.0 (fun _ -> Fit) else
-  if kv = _minus then zoom 0.9 (fun ar -> Fixed_AR (ar *. 0.9)) else
-  if kv = _plus then zoom (1.0 /. 0.9) (fun ar -> Fixed_AR (ar /. 0.9))
-
-  ; true
+  try 
+    (List.assoc kv acts) (); true
+  with Not_found -> false
 
 let resized event =
   let image_width = GdkEvent.Configure.width event
   and image_height = GdkEvent.Configure.height event in
-  
   Printf.eprintf "RESIZE: %dx%d\n" image_width image_height;
   show_spread ();
-  true
+  false
   
 
 let main () =
@@ -501,8 +502,8 @@ let main () =
 
   ignore (window#connect#destroy ~callback:Main.quit);
   ignore (window#event#connect#key_press ~callback:handle_key);
-(*  ignore (window#event#connect#configure ~callback:resized);*)
-  ignore (pane#event#connect#configure ~callback:resized);
+  ignore (window#event#connect#configure ~callback:resized);
+(*  ignore (pane#event#connect#configure ~callback:resized);*)
   show_spread ();
   window#show ();
   start_icf ();
