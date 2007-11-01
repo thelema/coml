@@ -24,7 +24,7 @@ type options = { mutable wrap: bool;
 		 mutable scale: scaling;
 		 mutable rar_exe: string;
 	       }
-
+(* TODO: save and load options *)
 let opt = { wrap = false; fullscreen = false; 
 	    twopage = false; manga = true;
 	    remove_failed = true; scale = Fit;
@@ -380,7 +380,7 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
 and show_spread () = 
   match !show_task with
       None -> 
-	show_task := Some (Idle.add ~prio:145 show_spread')
+	show_task := Some (Idle.add ~prio:115 show_spread')
     | Some _ -> ()
 
 let start_icf () =
