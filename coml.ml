@@ -122,6 +122,9 @@ let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ());
 let image_cache = { pos=0; pics=Array.make (cache_size ()) cache_null; } 
 let cache_last_idx () = min (image_cache.pos + (cache_size ()) - 1) !max_index
 
+let full_size pic = pixbuf_size pic.full
+let cur_size pic = pixbuf_size (opt_default pic.scaled pic.full)
+
 let within_cache_range idx =
   idx >= image_cache.pos && idx <= cache_last_idx ()
 
@@ -141,7 +144,7 @@ let set_cache idx v =
   if !idle_fill then raise (Cache_modified idx)
 
 let is_vert idx = 
-  let (w0,h0) = pixbuf_size (get_cache' idx).full in
+  let (w0,h0) = full_size (get_cache' idx) in
   w0 < h0
 
 let can_twopage idx =
@@ -297,14 +300,13 @@ and idle_scale idx scl_size =
 and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
-    let full_size = pixbuf_size pic.full in
-    let scl_size = scaled_size (!target_size) full_size in
+    let scl_size = scaled_size (!target_size) (full_size pic) in
     Printf.eprintf "PS:%d" idx;
     let do_scale = match pic.scaled with
       | None -> true | Some spb -> lacks_size' scl_size spb
     in
     if do_scale then (
-      let w0,h0 = pixbuf_size (opt_default pic.scaled pic.full)
+      let w0,h0 = cur_size pic
       and w1,h1 = scl_size and wt, ht = !target_size in
       Printf.eprintf "is:%dx%d to:%dx%d tgt:%dx%d \n" w0 h0 w1 h1 wt ht;
       idle_scale idx scl_size
@@ -321,12 +323,12 @@ and display idx tgt_image =
   (* generate simple preview *)
   let pic = get_cache idx in
   let scl_size = scaled_size ~target:(widget_size ~cap:200 spread) 
-    ~image:(pixbuf_size pic.full) in
+    ~image:(full_size pic) in
   let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
   tgt_image#set_pixbuf pb;
   ignore (Glib.Main.iteration true);
   target_size := widget_size ~cap:200 spread;
-  let scl_size = scaled_size ~target:!target_size ~image:(pixbuf_size pic.full) in
+  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in
   if lacks_size' scl_size pb then (
     if pic.scaled <> None then Printf.eprintf "RE";
     let w0,h0 = pixbuf_size pb and w1,h1 = scl_size and wt, ht = !target_size in
@@ -452,8 +454,8 @@ let zoom ar_val ar_func =
 		    Fit -> Fixed_AR ar_val 
 		  | Fixed_AR ar -> ar_func ar);
   let rescale idx = 
-    let cur_size = pixbuf_size (get_cache idx).full in
-    let target_size = scaled_size cur_size (widget_size image1) in
+    let pic = get_cache idx in
+    let target_size = scaled_size (full_size pic) (widget_size image1) in
     Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);
     idle_scale idx target_size
   in
