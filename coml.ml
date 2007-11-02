@@ -279,23 +279,11 @@ set_status (Printf.sprintf "Resizing img %d to %dx%d" idx (fst size) (snd size))
     set_cache idx ( Entry {pic with scaled = Some out} )
   in
   try 
-(*Printf.eprintf "IS:%d" idx; *)
-    if lacks_size size idx then (
-(*Printf.eprintf "->%dx%d" (fst size) (snd size);*)
+    if lacks_size size idx then
       scale_cache idx size; 
       if on_screen idx then show_spread ();
-(*      if lacks_size size idx
-        then 
-	  let sw,sh = match (get_cache' idx).scaled with None -> 0,0 | Some pb -> pixbuf_size pb
-	  and tw,th = size in
-	  Printf.eprintf "FAIL %dx%d <> %dx%d " sw sh tw th;
-        else 
-	  Printf.eprintf "ok  " *)
-    ) else (
-(*      Printf.eprintf "skip  "; *)
-    );
     false
-  with Not_found -> (*Printf.eprintf "%d NFOUND " idx;*) false
+  with Not_found -> false
 
 and idle_scale idx scl_size = 
   ignore (Idle.add ~prio:150 (scale_cache_idle idx scl_size))
@@ -310,29 +298,9 @@ and scale_cache_pre idx =
       idle_scale idx scl_size
   with Not_found -> ()
 
-and display idx tgt_image = 
-  let nearest_scale (width, height) pb =
-    let out_b = GdkPixbuf.create width height () in
-    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
-    out_b
-  in
-  (* generate simple preview *)
-  let pic = get_cache idx in
-  let scl_size = scaled_size ~target:(widget_size ~cap:200 spread) 
-    ~image:(full_size pic) in
-  let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
-  tgt_image#set_pixbuf pb;
-  ignore (Glib.Main.iteration true);
-  target_size := widget_size ~cap:200 spread;
-  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in
-  if lacks_size' scl_size pb then
-    idle_scale idx scl_size
-
 and idle_cache_fill () = 
   try 
     idle_fill := true;
-    set_status "ICF started";
-    
     (* load all pictures into cache *)
     for idx = image_cache.pos to cache_last_idx () do
       ignore (load_cache_if_empty idx);
@@ -349,6 +317,23 @@ and idle_cache_fill () =
     if on_screen idx then (show_spread (); true)
     else true
 
+and display idx tgt_image = 
+  let nearest_scale (width, height) pb =
+    let out_b = GdkPixbuf.create width height () in
+    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
+    out_b
+  in
+  (* generate simple preview *)
+  let pic = get_cache idx in
+  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in
+  let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
+  tgt_image#set_pixbuf pb;
+  ignore (Glib.Main.iteration true);
+(*  target_size := widget_size ~cap:200 spread;
+  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
+  if lacks_size' scl_size pb then
+    idle_scale idx scl_size
+
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
@@ -357,8 +342,9 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
   if can_twopage !image_idx then (
     set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
+    target_size := (max_w/2, max_h);
     if opt.manga then begin
-      display (!image_idx+1) image1;      
+      display (!image_idx+1) image1;
       display !image_idx image2;
     end else begin
       display !image_idx image1;
@@ -370,6 +356,7 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
   ) else (
     set_status (Printf.sprintf "Displaying img %d" !image_idx);
     image2#misc#hide ();
+    target_size := (max_w,max_h);
     display !image_idx image1;
     window#set_title (Printf.sprintf "Image %d of %d" !image_idx !max_index);
   );
@@ -454,7 +441,6 @@ let zoom ar_val ar_func =
   let rescale idx = 
     let pic = get_cache idx in
     let target_size = scaled_size (full_size pic) (widget_size spread) in
-(*    Printf.eprintf "RO:%d->%dx%d " idx (fst target_size) (snd target_size);*)
     idle_scale idx target_size
   in
   rescale !image_idx; 
