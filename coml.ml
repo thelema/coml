@@ -31,12 +31,6 @@ let opt = { wrap = false; fullscreen = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
-let _ = 
-  if Array.length Sys.argv < 2 then begin
-    Printf.printf "Usage: %s IMAGEFILE ...\n" Sys.argv.(0);
-    exit 1
-  end
-
 type book = { path : string; files: string array }
 let books = Stack.create ()
 
@@ -76,6 +70,12 @@ let _ = build_books (Array.to_list Sys.argv)
 
 let current_book = Stack.pop books
 let max_index = ref (Array.length current_book.files - 1)
+
+let _ = 
+  if !max_index = 0 then begin
+    Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
+    exit 1
+  end
 
 let get_page idx = Filename.concat current_book.path current_book.files.(idx)
 let remove_file idx = 
