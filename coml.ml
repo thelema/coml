@@ -11,6 +11,7 @@
  *)
 
 let opt_default opt def = match opt with Some v -> v | None -> def
+let (==>) x f = f x
    
 open GMain
    
@@ -31,13 +32,37 @@ let opt = { wrap = false; fullscreen = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
-type book = { path : string; files: string array }
-let books = Stack.create ()
+type book = { path : string; mutable files: string array }
+type library = {prev : book Stack.t; next : book Stack.t}
+let books = {prev=Stack.create ();
+	     next=Stack.create ()}
 
+let numeric_compare s1 s2 = 
+  let l1 = String.length s1 and l2 = String.length s2 in
+  let rec pos_diff i = 
+    if i = l1 then -2 else if i = l2 then -1
+    else if s1.[i] = s2.[i] then pos_diff (i+1) else i
+  and num_end i s =
+    try if s.[i] >= '0' && s.[i] <= '9' then num_end (i+1) s else i with _ -> i-1
+  in
+  if l1 = l2 then String.compare s1 s2 
+  else let d = pos_diff 0 in
+  if d = -2 then -1 else if d = -1 then 1 else
+    let e1 = num_end d s1 and e2 = num_end d s2 in
+    if e1 = d || e2 = d then Pervasives.compare s1 s2
+    else if e1 <> e2 then e1 - e2 else Pervasives.compare s1 s2
+(*begin
+(*      Printf.eprintf "Compare: %s & %s @ d:%d e1:%d e2:%d->" s1 s2 d e1 e2;*)
+      let n1 = Int64.of_string (String.sub s1 d (e1-d))
+      and n2 = Int64.of_string (String.sub s2 d (e2-d)) in
+(*      Printf.eprintf " %Ld & %Ld\n" n1 n2;*)
+      Int64.compare n1 n2
+    end
+ *)
 let push_books path files = 
   if Array.length files > 0 then 
-    Array.sort Pervasives.compare files;
-    Stack.push {path=path; files=files} books
+    Array.sort numeric_compare files;
+    Stack.push {path=path; files=files} books.next
 
 let archive_type fn = 
   let suf s = Filename.check_suffix fn s in 
@@ -64,24 +89,37 @@ let rec build_books = function
   | h :: t as l -> 
       let p1 = Filename.dirname h in 
       let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
-      push_books p1 (Array.of_list (List.map Filename.basename b1));
+      b1 ==>
+	List.filter Sys.file_exists ==>
+	List.map Filename.basename ==>
+	Array.of_list ==>
+	push_books p1;
       build_books rest
 let _ = build_books (Array.to_list Sys.argv)
 
-let current_book = Stack.pop books
-let max_index = ref (Array.length current_book.files - 1)
+let current_book () = Stack.top books.next
+let max_index () = Array.length (current_book()).files - 1
+
+let book_count = Stack.length books.next
+and cur_book_number () = Stack.length books.prev + 1
 
 let _ = 
-  if !max_index = 0 then begin
+  if max_index () = 0 then begin
     Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
   end
 
-let get_page idx = Filename.concat current_book.path current_book.files.(idx)
+let get_page idx = 
+  let cb = current_book () in Filename.concat cb.path cb.files.(idx)
 let remove_file idx = 
-  if idx <> !max_index then 
-    Array.blit current_book.files (idx+1) current_book.files idx (!max_index-idx);
-  decr max_index
+  let cb = current_book () in
+  if max_index () > 0 then 
+    cb.files <- Array.init (max_index () - 1) (fun i -> if i < idx then cb.files.(i) else cb.files.(i+1))
+  else begin
+    ignore (Stack.pop books.next);
+    if Stack.length books.next < 1 then
+      Stack.push (Stack.pop books.prev) books.next
+  end
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
@@ -122,7 +160,7 @@ let cache_null = Empty
 let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); 
 		    full = GdkPixbuf.create 1 1 ()}
 let image_cache = { pos=0; pics=Array.make (cache_size ()) cache_null; } 
-let cache_last_idx () = min (image_cache.pos + (cache_size ()) - 1) !max_index
+let cache_last_idx () = min (image_cache.pos + (cache_size ()) - 1) (max_index ())
 
 let full_size pic = pixbuf_size pic.full
 let cur_size pic = pixbuf_size (opt_default pic.scaled pic.full)
@@ -151,7 +189,7 @@ let is_vert idx =
 
 let can_twopage idx =
   try 
-    opt.twopage && is_vert idx && idx < !max_index && is_vert (idx + 1)
+    opt.twopage && is_vert idx && idx < max_index () && is_vert (idx + 1)
   with Not_found -> false
 
 let status_to_string entry = match entry.scaled with Some _ -> "S" | None -> "F"
@@ -187,6 +225,19 @@ set_status (Printf.sprintf "Recentering cache to %d" ctr);
    image_cache.pics <- ic2;
    image_cache.pos <- new_pos;
    print_cache ()
+
+let reset_cache_all () = image_cache.pics <- Array.make (cache_size ()) cache_null
+
+let next_book () = 
+  let cur = Stack.pop books.next in
+  Stack.push cur books.prev; 
+  reset_cache_all ()
+
+let prev_book () = 
+  let cur = Stack.pop books.prev in
+  Stack.push cur books.next; 
+  reset_cache_all ()
+
 
 let scale (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
@@ -259,9 +310,7 @@ let scaled_pair ~target ~image1 ~image2 =
   in
   (scale image1 ar, scale image2 ar)
 
-let reset_cache idx = 
-  if within_cache_range idx then
-    set_cache idx cache_null
+let reset_cache idx = if within_cache_range idx then set_cache idx cache_null
 
 let icf_task = ref None
 let show_task = ref None
@@ -350,15 +399,20 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
       display !image_idx image1;
       display (!image_idx+1) image2;
     end;
+    let w1, h1 = widget_size image1 and w2,h2 = widget_size image2 in
+    spread#misc#set_size_request ~width:(w1+w2) ~height:(max h1 h2) ();
     spread#move image2#coerce (fst (cur_size (get_cache !image_idx))) 0;
-    window#set_title (Printf.sprintf "Image %d,%d of %d"
-		      !image_idx (!image_idx+1) !max_index);
+    window#set_title (Printf.sprintf "Image %d,%d of %d, Book %d of %d : %s"
+		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) book_count (current_book()).path);
   ) else (
     set_status (Printf.sprintf "Displaying img %d" !image_idx);
     image2#misc#hide ();
     target_size := (max_w,max_h);
     display !image_idx image1;
-    window#set_title (Printf.sprintf "Image %d of %d" !image_idx !max_index);
+    let w1, h1 = widget_size image1 in
+    spread#misc#set_size_request ~width:w1 ~height:h1 ();
+    window#set_title (Printf.sprintf "Image %d of %d, Book %d of %d: %s" 
+			!image_idx (max_index()) (cur_book_number ()) book_count (current_book()).path);
   );
   show_task := None;
   false
@@ -377,31 +431,37 @@ let start_icf () =
     | Some _ -> ()
 
 let new_pos idx = 
-  if !image_idx <> idx then begin 
     image_idx := idx;
     recenter_cache !image_idx;
     start_icf ();
     show_spread ()
-  end
 
 let first_image () = set_status "At beginning of book"; new_pos 0
 
-let last_image () = set_status "At end of book"; new_pos (if can_twopage (!max_index-1) then !max_index - 1 else !max_index)
+let last_image () = set_status "At end of book"; new_pos (if can_twopage (max_index()-1) then max_index () - 1 else max_index())
+
+let past_end () = 
+  if opt.wrap then first_image () else
+  if Stack.length books.next <= 1 then set_status "At end of Library"
+  else begin next_book (); first_image () end
+
+let past_start () = 
+  if opt.wrap then last_image () else
+  if Stack.length books.prev < 1 then set_status "At start of Library"
+  else begin prev_book (); last_image () end
 
 let prev_image () =
   let movement = if can_twopage (max (!image_idx-2) 0) then 2 else 1 in
 set_status (Printf.sprintf "Going back %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
 
-  if !image_idx - movement < 0 then
-    if opt.wrap then last_image () else first_image ()
+  if !image_idx - movement < 0 then past_start ()
   else new_pos (!image_idx - movement)
     
 let next_image () =
   let movement = if can_twopage !image_idx then 2 else 1 in
 set_status (Printf.sprintf "Going forward %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
   
-  if !image_idx + movement >= !max_index then
-    if opt.wrap then first_image () else last_image()
+  if !image_idx + movement > max_index () then past_end ()
   else new_pos (!image_idx + movement)
     
 let toggle_fullscreen () =
@@ -460,6 +520,7 @@ let acts = [(_q, Main.quit);
 	    (_minus, zoom_out); (_plus, zoom_in);
 	    (_l, (fun () -> load_cache !image_idx));
 	    (_w, (fun () -> opt.wrap <- not opt.wrap));
+	    (_Page_Up, past_start); (_Page_Down, past_end);
 	   ]
 
 let handle_key event =
