@@ -50,41 +50,69 @@ let numeric_compare s1 s2 =
   if d = -2 then -1 else if d = -1 then 1 else
     let e1 = num_end d s1 and e2 = num_end d s2 in
     if e1 = d || e2 = d then Pervasives.compare s1 s2
-    else if e1 <> e2 then e1 - e2 else Pervasives.compare s1 s2
-(*begin
+(*    else if e1 <> e2 then e1 - e2 else Pervasives.compare s1 s2 *)
+    else begin
 (*      Printf.eprintf "Compare: %s & %s @ d:%d e1:%d e2:%d->" s1 s2 d e1 e2;*)
       let n1 = Int64.of_string (String.sub s1 d (e1-d))
       and n2 = Int64.of_string (String.sub s2 d (e2-d)) in
 (*      Printf.eprintf " %Ld & %Ld\n" n1 n2;*)
       Int64.compare n1 n2
     end
- *)
+
 let push_books path files = 
   if Array.length files > 0 then 
     Array.sort numeric_compare files;
     Stack.push {path=path; files=files} books.next
 
-let archive_type fn = 
-  let suf s = Filename.check_suffix fn s in 
-  if suf "rar" then `Rar 
-  else if suf "zip" then `Zip 
-  else if suf "7z" then `Sev_zip 
-  else `Not_archive
+let archive_suffixes = [("rar", `Rar); ("zip", `Zip); ("7z", `Sev_zip)]
+let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
 
-let is_archive file = match archive_type file with `Not_archive -> false | _ -> true
+let suffix_type suf_list fn = 
+  let suf s = Filename.check_suffix fn s in 
+  List.fold_left 
+    (fun acc (s, tag) -> if suf s then tag else acc) `None suf_list
+
+let any_suffix suf_list fn = 
+  let suf s = Filename.check_suffix fn s in 
+  List.fold_left 
+    (fun acc (s, tag) -> if suf s then true else acc) false suf_list
+
+let archive_type fn = suffix_type archive_suffixes fn
+let is_archive fn = any_suffix archive_suffixes fn
+let is_picture fn = any_suffix pic_suffixes fn
+
+let extract_archive file dir =
+  match archive_type file with
+    | `Rar -> Sys.command (Printf.sprintf "rar x \"%s\" \"%s\"/" file dir)
+    | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
+    | `Sev_zip -> 255
+    | `None -> assert false
+
+let rec rec_del path = 
+  let remove fn = (*Printf.eprintf "Removing: %s"*) Sys.remove fn in
+  Sys.readdir path
+  ==> Array.map (fun fn -> Filename.concat path fn)
+  ==> Array.iter (fun fn -> if Sys.is_directory fn
+		  then rec_del fn
+		  else remove fn)
+  (*remove path*)
+
 
 let rec build_books = function 
     [] -> () 
   | h :: t when Sys.is_directory h ->
       let files = Sys.readdir h in
-      push_books h files;
-      build_books t
+      build_books (t @ (List.map (Filename.concat h) (Array.to_list files)))
   | h :: t when is_archive h ->
-      let td = Filename.concat Filename.temp_dir_name "coml" in
+      let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
       (* extract archive to td *)
-      
-      (* on quit, remove the extracted archive *)
-      build_books (td::t)
+      let return_code = extract_archive h td in
+      if return_code = 0 && Sys.file_exists td then begin
+	at_exit (fun () -> rec_del td);
+	(* on quit, remove the extracted archive *)
+	build_books (td::t)
+      end else
+	build_books t
   | h :: t when not (Sys.file_exists h) -> build_books t
   | h :: t as l -> 
       let p1 = Filename.dirname h in 
@@ -92,34 +120,19 @@ let rec build_books = function
       b1 ==>
 	List.filter Sys.file_exists ==>
 	List.map Filename.basename ==>
+	List.filter is_picture ==>
 	Array.of_list ==>
 	push_books p1;
       build_books rest
-let _ = build_books (Array.to_list Sys.argv)
 
 let current_book () = Stack.top books.next
 let max_index () = Array.length (current_book()).files - 1
 
-let book_count = Stack.length books.next
+let book_count () = Stack.length books.next + Stack.length books.prev
 and cur_book_number () = Stack.length books.prev + 1
-
-let _ = 
-  if max_index () = 0 then begin
-    Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
-    exit 1
-  end
 
 let get_page idx = 
   let cb = current_book () in Filename.concat cb.path cb.files.(idx)
-let remove_file idx = 
-  let cb = current_book () in
-  if max_index () > 0 then 
-    cb.files <- Array.init (max_index () - 1) (fun i -> if i < idx then cb.files.(i) else cb.files.(i+1))
-  else begin
-    ignore (Stack.pop books.next);
-    if Stack.length books.next < 1 then
-      Stack.push (Stack.pop books.prev) books.next
-  end
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
@@ -244,6 +257,20 @@ let scale (wi,hi) ar =
   and h1 = int_of_float (float_of_int hi *. ar) in
   (w1,h1)
 
+let image_idx = ref 0
+
+let remove_file idx = 
+  let cb = current_book () in
+  if max_index () > 0 then begin
+    cb.files <- Array.init (max_index ()) (fun i -> if i < idx then cb.files.(i) else cb.files.(i+1));
+    if !image_idx > max_index() then image_idx := max_index()
+  end else begin
+    ignore (Stack.pop books.next);
+    image_idx := 0;
+    if Stack.length books.next < 1 then
+      Stack.push (Stack.pop books.prev) books.next
+  end
+
 let rec load_cache idx = 
   try 
 set_status (Printf.sprintf "Loading img %d" idx);
@@ -271,8 +298,6 @@ let get_cache idx =
 let load_cache_if_empty idx =
   try ignore(get_cache' idx)
   with Not_found -> load_cache idx
-
-let image_idx = ref 0
 
 let on_screen idx = idx = !image_idx || (idx = (!image_idx + 1) && can_twopage (!image_idx))
 
@@ -399,11 +424,12 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
       display !image_idx image1;
       display (!image_idx+1) image2;
     end;
-    let w1, h1 = widget_size image1 and w2,h2 = widget_size image2 in
-    spread#misc#set_size_request ~width:(w1+w2) ~height:(max h1 h2) ();
-    spread#move image2#coerce (fst (cur_size (get_cache !image_idx))) 0;
+(*    let w1, h1 = widget_size image1 and w2,h2 = widget_size image2 in
+    spread#misc#set_size_request ~width:(w1+w2) ~height:(max h1 h2) (); *)
+    let sw, _ = scaled_size ~target:!target_size ~image:(full_size (get_cache !image_idx)) in
+    spread#move image2#coerce sw 0;
     window#set_title (Printf.sprintf "Image %d,%d of %d, Book %d of %d : %s"
-		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) book_count (current_book()).path);
+		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   ) else (
     set_status (Printf.sprintf "Displaying img %d" !image_idx);
     image2#misc#hide ();
@@ -412,7 +438,7 @@ Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
     let w1, h1 = widget_size image1 in
     spread#misc#set_size_request ~width:w1 ~height:h1 ();
     window#set_title (Printf.sprintf "Image %d of %d, Book %d of %d: %s" 
-			!image_idx (max_index()) (cur_book_number ()) book_count (current_book()).path);
+			!image_idx (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   );
   show_task := None;
   false
@@ -538,6 +564,13 @@ let resized event =
   
 
 let main () =
+  Random.self_init ();
+  build_books (Sys.argv ==> Array.to_list ==> List.tl ==> List.rev);
+  if max_index () = 0 then begin
+    Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
+    exit 1
+  end;
+
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
   and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
@@ -556,4 +589,4 @@ let main () =
   start_icf ();
   Main.main ()
     
-let _ = Printexc.print main ()
+let _ = main ()
