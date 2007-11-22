@@ -64,7 +64,7 @@ let push_books path files =
     Array.sort numeric_compare files;
     Stack.push {path=path; files=files} books.next
 
-let archive_suffixes = [("rar", `Rar); ("zip", `Zip); ("7z", `Sev_zip)]
+let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
 
 let suffix_type suf_list fn = 
@@ -75,7 +75,7 @@ let suffix_type suf_list fn =
 let any_suffix suf_list fn = 
   let suf s = Filename.check_suffix fn s in 
   List.fold_left 
-    (fun acc (s, tag) -> if suf s then true else acc) false suf_list
+    (fun acc (s, _) -> if suf s then true else acc) false suf_list
 
 let archive_type fn = suffix_type archive_suffixes fn
 let is_archive fn = any_suffix archive_suffixes fn
