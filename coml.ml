@@ -67,15 +67,13 @@ let push_books path files =
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
 
-let suffix_type suf_list fn = 
-  let suf s = Filename.check_suffix fn s in 
-  List.fold_left 
-    (fun acc (s, tag) -> if suf s then tag else acc) `None suf_list
+let fold_sufchecks fn set_acc init suf_list = 
+  let folder acc (s, tag) =
+    if Filename.check_suffix fn s then set_acc tag else acc in 
+  List.fold_left folder init suf_list
 
-let any_suffix suf_list fn = 
-  let suf s = Filename.check_suffix fn s in 
-  List.fold_left 
-    (fun acc (s, _) -> if suf s then true else acc) false suf_list
+let suffix_type suf_list fn = fold_sufchecks fn (fun tag -> tag) `None suf_list
+let any_suffix suf_list fn = fold_sufchecks fn (fun _ -> true) false suf_list
 
 let archive_type fn = suffix_type archive_suffixes fn
 let is_archive fn = any_suffix archive_suffixes fn
@@ -100,6 +98,7 @@ let rec rec_del path =
 
 let rec build_books = function 
     [] -> () 
+  | h :: t when not (Sys.file_exists h) -> build_books t
   | h :: t when Sys.is_directory h ->
       let files = Sys.readdir h in
       build_books (t @ (List.map (Filename.concat h) (Array.to_list files)))
@@ -113,7 +112,6 @@ let rec build_books = function
 	build_books (td::t)
       end else
 	build_books t
-  | h :: t when not (Sys.file_exists h) -> build_books t
   | h :: t as l -> 
       let p1 = Filename.dirname h in 
       let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
@@ -231,6 +229,7 @@ set_status (Printf.sprintf "Recentering cache to %d" ctr);
    and new_start, new_end = new_pos, new_pos + new_size - 1 in
    let overlap_start = max old_start new_start
    and overlap_end = min old_end new_end in
+   Printf.eprintf "blit ic %d ic2 %d %d\n" (overlap_start-old_start) (overlap_start-new_start) (overlap_end - overlap_start + 1);
    if overlap_start <= overlap_end then
      Array.blit ic (overlap_start-old_start) ic2 (overlap_start-new_start)
        (overlap_end - overlap_start + 1);
