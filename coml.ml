@@ -320,20 +320,25 @@ let scaled_size ~target ~image =
     | Fixed_AR ar -> ar
   in
   scale image ar
-
+    
 let scaled_pair ~target ~image1 ~image2 =
-  let w0,h0 = target in
-  let w1,h1 = image1 and w2,h2 = image2 in
-  let ar = match opt.scale with
+  match opt.scale with
       Fit -> 
-	let tar1 = (float_of_int w0) /. (float_of_int (w1 + w2))
-	and tar2 = (float_of_int h0) /. (float_of_int h1)
-	and tar3 = (float_of_int h0) /. (float_of_int h2) in
-	min 1.0 (min tar1 (min tar2 tar3))
-    | Fixed_AR ar -> ar
-  in
-  (scale image1 ar, scale image2 ar)
-
+	let w0,h0 = target in
+	let w1,h1 = image1 and w2,h2 = image2 in
+Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
+	let tar_w = min 1.0 ((float_of_int w0) /. (float_of_int (w1 + w2))) in
+	if h1 = h2 then 
+	  let tar_h = (float_of_int h0) /. (float_of_int h1) in
+	  let ar = min tar_w tar_h in
+	  (scale image1 ar, scale image2 ar)
+	else
+	  let tar_h1 = (float_of_int h0) /. (float_of_int h1)
+	  and tar_h2 = (float_of_int h0) /. (float_of_int h2) in
+	  let ar1 = min tar_w tar_h1 and ar2 = min tar_w tar_h2 in
+	  (scale image1 ar1, scale image2 ar2)
+    | Fixed_AR ar -> (scale image1 ar, scale image2 ar)
+	
 let reset_cache idx = if within_cache_range idx then set_cache idx cache_null
 
 let icf_task = ref None
@@ -390,7 +395,7 @@ and idle_cache_fill () =
     if on_screen idx then (show_spread (); true)
     else true
 
-and display idx tgt_image = 
+and display1 idx = 
   let nearest_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
@@ -400,42 +405,61 @@ and display idx tgt_image =
   let pic = get_cache idx in
   let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in
   let pb = opt_default pic.scaled (nearest_scale scl_size pic.full) in
-  tgt_image#set_pixbuf pb;
+  image1#set_pixbuf pb;
+  let h1 = ((snd !target_size) - (snd scl_size)) / 2
+  and v1 = ((fst !target_size) - (fst scl_size)) / 2 in
+  spread#move image1#coerce v1 h1;
   ignore (Glib.Main.iteration true);
 (*  target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
   if lacks_size' scl_size pb then
     idle_scale idx scl_size
+and display2 idx1 idx2 = 
+  let nearest_scale (width, height) pb =
+    let out_b = GdkPixbuf.create width height () in
+    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
+    out_b
+  in
+  (* generate simple preview *)
+  let pic1 = get_cache idx1 and pic2 = get_cache idx2 in
+  let scl_size1, scl_size2 = scaled_pair ~target:!target_size ~image1:(full_size pic1) ~image2:(full_size pic2) in
+  let pb1 = match pic1.scaled with None -> nearest_scale scl_size1 pic1.full | Some p -> p
+  and pb2 = match pic2.scaled with None -> nearest_scale scl_size2 pic2.full | Some p -> p in
+  image1#set_pixbuf pb1;
+  image2#set_pixbuf pb2;
+  let h1 = ((snd !target_size) - (snd scl_size1)) / 2
+  and h2 = ((snd !target_size) - (snd scl_size2)) / 2 in
+  spread#move image1#coerce 0 h1;
+  spread#move image2#coerce (fst scl_size1) h2;
+  ignore (Glib.Main.iteration true);
+(*  target_size := widget_size ~cap:200 spread;
+  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
+  if lacks_size' scl_size1 pb1 then idle_scale idx1 scl_size1;
+  if lacks_size' scl_size2 pb2 then idle_scale idx2 scl_size2;
 
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
   let max_w, max_h = widget_size scroller in
 Printf.eprintf "disp max_size: %dx%d\n" max_w max_h;
+  target_size := (max_w, max_h);
   if can_twopage !image_idx then (
     set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
     image2#misc#show ();
-    target_size := (max_w/2, max_h);
-    if opt.manga then begin
-      display (!image_idx+1) image1;
-      display !image_idx image2;
-    end else begin
-      display !image_idx image1;
-      display (!image_idx+1) image2;
-    end;
+    if opt.manga then
+      display2 (!image_idx+1) !image_idx
+    else
+      display2 !image_idx (!image_idx+1);
 (*    let w1, h1 = widget_size image1 and w2,h2 = widget_size image2 in
     spread#misc#set_size_request ~width:(w1+w2) ~height:(max h1 h2) (); *)
-    let sw, _ = scaled_size ~target:!target_size ~image:(full_size (get_cache !image_idx)) in
-    spread#move image2#coerce sw 0;
     window#set_title (Printf.sprintf "Image %d,%d of %d, Book %d of %d : %s"
 		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   ) else (
     set_status (Printf.sprintf "Displaying img %d" !image_idx);
     image2#misc#hide ();
-    target_size := (max_w,max_h);
-    display !image_idx image1;
-    let w1, h1 = widget_size image1 in
-    spread#misc#set_size_request ~width:w1 ~height:h1 ();
+    display1 !image_idx;
+(*    let w1, h1 = widget_size image1 in
+    spread#misc#set_size_request ~width:w1 ~height:h1 ();*)
     window#set_title (Printf.sprintf "Image %d of %d, Book %d of %d: %s" 
 			!image_idx (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   );
