@@ -301,7 +301,7 @@ let load_cache_if_empty idx =
 
 let on_screen_pics = ref []
 
-let on_screen pic = (* idx = !image_idx || (idx = (!image_idx + 1) && can_twopage (!image_idx)) *) List.memq pic !on_screen_pics 
+let on_screen pic = List.memq pic !on_screen_pics 
 
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
 let lacks_size size pb = size_diff (pixbuf_size pb) size
@@ -370,8 +370,9 @@ and idle_scale pic size =
 and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
-    let scl_size = scaled_size (widget_size scroller) (full_size pic) in
-    idle_scale pic scl_size
+    if pic.t_size = None then 
+      let scl_size = scaled_size (widget_size scroller) (full_size pic) in
+      idle_scale pic scl_size
   with Not_found -> ()
 
 and idle_cache_fill () = 
@@ -543,7 +544,7 @@ let zoom ar_val ar_func =
 		  | Fixed_AR ar -> ar_func ar);
   let rescale idx = 
     let pic = get_cache idx in
-    let target_size = scaled_size (full_size pic) (widget_size spread) in
+    let target_size = scaled_size (widget_size spread) (full_size pic) in
     idle_scale pic target_size
   in
   rescale !image_idx; 
