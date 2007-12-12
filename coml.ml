@@ -193,9 +193,6 @@ let get_cache' idx =
       | Failed -> failed_load
   with Invalid_argument _ -> raise Not_found
 
-let idle_fill = ref false
-exception Cache_modified of pic (* should only be raised if !idle_fill = true *)
-
 let set_cache idx v =
   image_cache.pics.(idx - image_cache.pos) <- v
 
@@ -286,8 +283,7 @@ set_status (Printf.sprintf "Loading img %d" idx);
       on_update = None;
     } in
 (*Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));*)
-    set_cache idx (Entry pic);
-    if !idle_fill then raise (Cache_modified pic)
+    set_cache idx (Entry pic)
   with GdkPixbuf.GdkPixbufError(_,msg) ->
 (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
       ~buttons:GWindow.Buttons.close ~show:true () in
