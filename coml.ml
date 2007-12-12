@@ -32,6 +32,9 @@ let opt = { wrap = false; fullscreen = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
+let preload_prio = 150 and show_prio = 115 and scale_prio = 200
+
+
 type book = { path : string; mutable files: string array }
 type library = {prev : book Stack.t; next : book Stack.t}
 let books = {prev=Stack.create ();
@@ -160,17 +163,19 @@ let pixbuf_size pix =
   and h = GdkPixbuf.get_height pix in
   (w,h)
 
-type pic = {full: GdkPixbuf.pixbuf; 
-	    mutable scaled: GdkPixbuf.pixbuf option; 
-	    mutable t_size: (int * int) option}
-type file = Failed | Empty | Entry of pic
+type pic = { full: GdkPixbuf.pixbuf; 
+	     mutable scaled: GdkPixbuf.pixbuf option; 
+	     mutable t_size: (int * int) option;
+	     mutable on_update : (unit -> unit) option }
+type file = Failed | Not_loaded | Entry of pic
 type cache = {mutable pos: int; mutable pics: file array}
 let cache_past = ref 1 and cache_future = ref 1
 let cache_size () = !cache_past + !cache_future + 1
-let cache_null = Empty
+let cache_null = Not_loaded
 let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); 
 		    full = GdkPixbuf.create 1 1 ();
-		    t_size = Some (1,1) }
+		    t_size = Some (1,1) ;
+		    on_update = None }
 let image_cache = { pos=0; pics=Array.make (cache_size ()) cache_null; } 
 let cache_last_idx () = min (image_cache.pos + (cache_size ()) - 1) (max_index ())
 
@@ -184,7 +189,7 @@ let get_cache' idx =
   try
     match image_cache.pics.(idx - image_cache.pos) with
 	Entry cb -> cb
-      | Empty -> raise Not_found
+      | Not_loaded -> raise Not_found
       | Failed -> failed_load
   with Invalid_argument _ -> raise Not_found
 
@@ -208,7 +213,7 @@ let status_to_string entry = match entry.scaled with Some _ -> "S" | None -> "F"
 let print_cache () = 
   Printf.eprintf "Cache: p=%d; pics={" image_cache.pos;
   let print_pic = function 
-      Empty -> Printf.eprintf "None-" 
+      Not_loaded -> Printf.eprintf "None-" 
     | Failed -> Printf.eprintf "FAIL-" 
     | Entry p -> Printf.eprintf "%s-" (status_to_string p) 
   in
@@ -274,7 +279,12 @@ let rec load_cache idx =
   try 
 set_status (Printf.sprintf "Loading img %d" idx);
 (*Printf.eprintf "L:%d=" idx;*)
-    let pic = { full = GdkPixbuf.from_file (get_page idx); scaled=None; t_size=None} in
+    let pic = { 
+      full = GdkPixbuf.from_file (get_page idx); 
+      scaled = None; 
+      t_size = None;
+      on_update = None;
+    } in
 (*Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));*)
     set_cache idx (Entry pic);
     if !idle_fill then raise (Cache_modified pic)
@@ -295,13 +305,29 @@ let get_cache idx =
   try get_cache' idx 
   with Not_found -> load_cache idx; get_cache' idx
 
-let load_cache_if_empty idx =
-  try ignore(get_cache' idx)
-  with Not_found -> load_cache idx
+let get_cache' idx =
+  try
+    match image_cache.pics.(idx - image_cache.pos) with
+	Entry cb -> cb
+      | Not_loaded -> raise Not_found
+      | Failed -> failed_load
+  with Invalid_argument _ -> raise Not_found
 
-let on_screen_pics = ref []
+let preload_pic idx =
+  let lc_task () = 
+    (if within_cache_range idx then 
+      match image_cache.pics.(idx - image_cache.pos) with
+	  Entry _ | Failed -> ()
+	| Not_loaded -> load_cache idx);
+    false
+  in
+  ignore(Idle.add ~prio:preload_prio lc_task)
 
-let on_screen pic = List.memq pic !on_screen_pics 
+let preload_cache () = for i = image_cache.pos to cache_last_idx () do preload_pic i done
+
+let set_to_update = ref []
+
+(*let on_screen pic = List.memq pic !set_to_update *)
 
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
 let lacks_size size pb = size_diff (pixbuf_size pb) size
@@ -344,29 +370,26 @@ Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
 	
 let reset_cache idx = if within_cache_range idx then set_cache idx cache_null
 
-let icf_task = ref None
 let show_task = ref None
 
 let rec scale_cache_idle pic () = 
-  let scale_cache pic (width, height) =
-set_status (Printf.sprintf "Resizing img to %dx%d" width height);
-    let scaled = GdkPixbuf.create width height () in
-    GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
-    pic.scaled <- Some scaled;
-    if !idle_fill then raise (Cache_modified pic)
-  in
   begin try 
     match lacks_t_size pic with
 	None -> ()
-      | Some size ->
-	  scale_cache pic size; 
-	  if on_screen pic then show_spread ()
+      | Some (width,height) ->
+	  set_status (Printf.sprintf "Resizing img to %dx%d" width height);
+	  let scaled = GdkPixbuf.create width height () in
+	  GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
+	  pic.scaled <- Some scaled;
+(*	  if !idle_fill then raise (Cache_modified pic) *)
+	  match pic.on_update with None -> () | Some f -> f ()
   with Not_found -> ()
   end; false
     
 and idle_scale pic size = 
   pic.t_size <- Some size;
-  ignore (Idle.add ~prio:150 (scale_cache_idle pic))
+  ignore (Idle.add ~prio:scale_prio (scale_cache_idle pic))
+(*
 and scale_cache_pre idx =
   try 
     let pic = get_cache' idx in
@@ -374,25 +397,7 @@ and scale_cache_pre idx =
       let scl_size = scaled_size (widget_size scroller) (full_size pic) in
       idle_scale pic scl_size
   with Not_found -> ()
-
-and idle_cache_fill () = 
-  try 
-    idle_fill := true;
-    (* load all pictures into cache *)
-    for idx = image_cache.pos to cache_last_idx () do
-      ignore (load_cache_if_empty idx);
-    done;
-    (* scale all pictures in cache *)
-    for idx = image_cache.pos to cache_last_idx () do
-      ignore (scale_cache_pre idx);
-    done;
-    idle_fill := false; 
-    icf_task := None;
-    false (* we're done filling the cache *)
-  with Cache_modified pic -> 
-    idle_fill := false;
-    if on_screen pic then (show_spread (); true)
-    else true
+ *)
 
 and nearest_scale (width, height) pb =
     let out_b = GdkPixbuf.create width height () in
@@ -411,7 +416,12 @@ Printf.eprintf "disp max_size: %dx%d\n" w0 h0;
   let w1,h1 = scaled_size ~target:(w0,h0) ~image:(full_size pic) in
   let pb = quick_view (w1,h1) pic in
   image1#set_pixbuf pb;
-  on_screen_pics := [pic];
+  (* clear old update functions *)
+  List.iter (fun p -> p.on_update <- None) !set_to_update;
+  (* set new update functions *)
+  pic.on_update <- Some (fun () -> display1 idx);
+  (* record which to clear *)
+  set_to_update := [pic];
   let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
   spread#move image1#coerce w_off h_off;
   ignore (Glib.Main.iteration true);
@@ -426,7 +436,13 @@ Printf.eprintf "disp max_size: %dx%d\n" w0 h0;
   let (w1,h1), (w2,h2) = scaled_pair ~target:(w0,h0) ~image1:(full_size pic1) ~image2:(full_size pic2) in
   let pb1 = quick_view (w1,h1) pic1 and pb2 = quick_view (w2,h2) pic2 in
   image1#set_pixbuf pb1; image2#set_pixbuf pb2;
-  on_screen_pics := [pic1; pic2];
+  (* clear old update functions *)
+  List.iter (fun p -> p.on_update <- None) !set_to_update;
+  (* set new update functions *)
+  pic1.on_update <- Some (fun () -> display2 idx1 idx2);
+  pic2.on_update <- Some (fun () -> display2 idx1 idx2);
+  (* record which to clear *)
+  set_to_update := [pic1; pic2];
   let h_off1 = (h0-h1) / 2 and h_off2 = (h0-h2) / 2 in
   spread#move image1#coerce 0 h_off1;
   spread#move image2#coerce w1 h_off2;
@@ -465,19 +481,13 @@ and show_spread' () =
 and show_spread () = 
   match !show_task with
       None -> 
-	show_task := Some (Idle.add ~prio:115 show_spread')
-    | Some _ -> ()
-
-let start_icf () =
-  match !icf_task with
-      None -> 
-	icf_task := Some (Idle.add ~prio:250 idle_cache_fill);
+	show_task := Some (Idle.add ~prio:show_prio show_spread')
     | Some _ -> ()
 
 let new_pos idx = 
     image_idx := idx;
     recenter_cache !image_idx;
-    start_icf ();
+    preload_cache ();
     show_spread ()
 
 let first_image () = set_status "At beginning of book"; new_pos 0
@@ -526,7 +536,7 @@ let toggle_twopage () =
   cache_past := if opt.twopage then 2 else 1;
   cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
   recenter_cache !image_idx;
-  start_icf ();
+  preload_cache ();
   show_spread ()
 
 let toggle_manga () =
@@ -604,7 +614,7 @@ let main () =
 (*  ignore (pane#event#connect#configure ~callback:resized);*)
   show_spread ();
   window#show ();
-  start_icf ();
+  preload_cache ();
   Main.main ()
     
 let _ = main ()
