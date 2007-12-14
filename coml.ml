@@ -374,7 +374,7 @@ let rec scale_cache_idle pic () =
 	None -> ()
       | Some (width,height) ->
 	  set_status (Printf.sprintf "Resizing img to %dx%d" width height);
-	  let scaled = GdkPixbuf.create width height () in
+	  let scaled = GdkPixbuf.create ~width ~height ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
 	  GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
 	  pic.scaled <- Some scaled;
 (*	  if !idle_fill then raise (Cache_modified pic) *)
@@ -385,18 +385,9 @@ let rec scale_cache_idle pic () =
 and idle_scale pic size = 
   pic.t_size <- Some size;
   ignore (Idle.add ~prio:scale_prio (scale_cache_idle pic))
-(*
-and scale_cache_pre idx =
-  try 
-    let pic = get_cache' idx in
-    if pic.t_size = None then 
-      let scl_size = scaled_size (widget_size scroller) (full_size pic) in
-      idle_scale pic scl_size
-  with Not_found -> ()
- *)
 
 and nearest_scale (width, height) pb =
-    let out_b = GdkPixbuf.create width height () in
+    let out_b = GdkPixbuf.create ~width ~height ~has_alpha:(GdkPixbuf.get_has_alpha pb) () in
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
     out_b
 and quick_view size pic = 
