@@ -326,12 +326,11 @@ let set_to_update = ref []
 (*let on_screen pic = List.memq pic !set_to_update *)
 
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
-let lacks_size size pb = size_diff (pixbuf_size pb) size
+let lacks_size size = function None -> true | Some pb -> size_diff (pixbuf_size pb) size
 let lacks_t_size pic =
-  match pic.scaled,pic.t_size with
-    | None,None | Some _, None -> None
-    | None,Some s -> Some s
-    | Some sc, Some s -> if lacks_size s sc then Some s else None
+  match pic.t_size with 
+    | None -> None
+    | Some s -> if lacks_size s pic.scaled then Some s else None
 
 let scale_factor (wt,ht) (wi, hi) =
   let wt = float_of_int wt and ht = float_of_int ht
@@ -374,7 +373,7 @@ let rec scale_cache_idle pic () =
 	None -> ()
       | Some (width,height) ->
 	  set_status (Printf.sprintf "Resizing img to %dx%d" width height);
-	  let scaled = GdkPixbuf.create ~width ~height ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
+	  let scaled = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
 	  GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
 	  pic.scaled <- Some scaled;
 (*	  if !idle_fill then raise (Cache_modified pic) *)
@@ -385,44 +384,71 @@ let rec scale_cache_idle pic () =
 and idle_scale pic size = 
   pic.t_size <- Some size;
   ignore (Idle.add ~prio:scale_prio (scale_cache_idle pic))
-
-and nearest_scale (width, height) pb =
-    let out_b = GdkPixbuf.create ~width ~height ~has_alpha:(GdkPixbuf.get_has_alpha pb) () in
-    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
+and quick_view pic = 
+  let (width, height) = match pic.t_size with None -> assert false | Some s -> s in
+  if lacks_size (width, height) pic.scaled 
+  then     
+    let out_b = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
+    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pic.full;
     out_b
-and quick_view size pic = 
-  let pb1 = (opt_default pic.scaled pic.full) in
-  if lacks_size size pb1 
-  then nearest_scale size pic.full
-  else pb1
+  else match pic.scaled with None -> assert false | Some pb -> pb
+and quick_view2 pic1 pic2 = 
+  set_status ("quick_view start");
+  let (w1,h1) = match pic1.t_size with None -> assert false | Some s -> s in
+  let (w2,h2) = match pic2.t_size with None -> assert false | Some s -> s in
+  let out_w = w1+w2 and out_h = max h1 h2 in
+  let out_bits = max (GdkPixbuf.get_bits_per_sample pic1.full) (GdkPixbuf.get_bits_per_sample pic2.full)
+  and out_alpha = (GdkPixbuf.get_has_alpha pic1.full) || (GdkPixbuf.get_has_alpha pic2.full) in
+  let out_b = GdkPixbuf.create ~width:out_w ~height:out_h
+    ~bits:out_bits ~has_alpha:out_alpha () in
+  if lacks_size (w1,h1) pic1.scaled then
+    GdkPixbuf.scale ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 ~interp:`NEAREST pic1.full
+  else begin
+    match pic1.scaled with None -> assert false 
+      | Some pb ->
+	  GdkPixbuf.copy_area ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 pb;
+  end;
+  if lacks_size (w2,h2) pic2.scaled then 
+    GdkPixbuf.scale ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2 ~height:h2 ~ofs_x:(float w1) ~scale_x:(float w1 /. float (GdkPixbuf.get_width pic2.full)) ~interp:`NEAREST pic2.full
+  else begin
+    match pic2.scaled with None -> assert false 
+      | Some pb ->
+	  GdkPixbuf.copy_area ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2~height:h2 pb;
+  end;
+  set_status ("quick_view end");
+  out_b
+(*  let h_off1 = (h0-h1) / 2 and h_off2 = (h0-h2) / 2 in
+  spread#move image1#coerce 0 h_off1;
+  spread#move image2#coerce w1 h_off2; *)
 and display1 idx = 
   (* generate simple preview *)
   let pic = get_cache idx in
   let w0,h0 = (widget_size scroller) in
-Printf.eprintf "disp max_size: %dx%d\n" w0 h0;
   let w1,h1 = scaled_size ~target:(w0,h0) ~image:(full_size pic) in
-  let pb = quick_view (w1,h1) pic in
+  idle_scale pic (w1,h1); (* sets t_size used in quick_view *)
+  let pb = quick_view pic in
   image1#set_pixbuf pb;
+  let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
+  spread#move image1#coerce w_off h_off;
+
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
   (* set new update functions *)
   pic.on_update <- Some (fun () -> display1 idx);
   (* record which to clear *)
   set_to_update := [pic];
-  let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
-  spread#move image1#coerce w_off h_off;
-  ignore (Glib.Main.iteration true);
-(*  target_size := widget_size ~cap:200 spread;
-  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
-  idle_scale pic (w1,h1)
+
+  ignore (Glib.Main.iteration true)
 and display2 idx1 idx2 = 
   (* generate simple preview *)
   let pic1 = get_cache idx1 and pic2 = get_cache idx2 in
   let w0,h0 = (widget_size scroller) in
-Printf.eprintf "disp max_size: %dx%d\n" w0 h0;
   let (w1,h1), (w2,h2) = scaled_pair ~target:(w0,h0) ~image1:(full_size pic1) ~image2:(full_size pic2) in
-  let pb1 = quick_view (w1,h1) pic1 and pb2 = quick_view (w2,h2) pic2 in
-  image1#set_pixbuf pb1; image2#set_pixbuf pb2;
+  idle_scale pic1 (w1,h1); idle_scale pic2 (w2,h2);
+  let pb = quick_view2 pic1 pic2 in
+  image1#set_pixbuf pb;
+  spread#move image1#coerce 0 0;
+
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
   (* set new update functions *)
@@ -430,13 +456,10 @@ Printf.eprintf "disp max_size: %dx%d\n" w0 h0;
   pic2.on_update <- Some (fun () -> display2 idx1 idx2);
   (* record which to clear *)
   set_to_update := [pic1; pic2];
-  let h_off1 = (h0-h1) / 2 and h_off2 = (h0-h2) / 2 in
-  spread#move image1#coerce 0 h_off1;
-  spread#move image2#coerce w1 h_off2;
-  ignore (Glib.Main.iteration true);
+
+  ignore (Glib.Main.iteration true)
 (*  target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
-  idle_scale pic1 (w1,h1); idle_scale pic2 (w2,h2)
 
 and show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
