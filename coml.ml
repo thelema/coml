@@ -137,12 +137,9 @@ let get_page idx =
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
-let scroller = GBin.scrolled_window ~packing:pane#add1 ()
+let scroller = GBin.scrolled_window ~packing:pane#add1 ~width:9999 ~height:9999 ()
 let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
-let spread = GPack.layout ~packing:scroller#add ~width:9999 ~height:9999 ()
-(*let _ = spread#set_homogeneous false; spread#set_spacing 0 *)
-let image2 = GMisc.image ~packing:spread#add ()
-let image1 = GMisc.image ~packing:spread#add ()
+let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
 let footer = GPack.hbox ~packing:pane#pack2 ()
 let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
 let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
@@ -151,12 +148,7 @@ let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
 let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
-let widget_size ?cap widget = 
-  let {Gtk.x=x0; y=y0; width=width; height=height} = 
-    widget#misc#allocation in 
-  match cap with
-      Some i -> (max width i, max height i)
-    | None -> (width, height)
+let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
 
 let pixbuf_size pix =
   let w = GdkPixbuf.get_width pix 
@@ -431,13 +423,12 @@ let show_task = ref None
 let rec display1 idx = 
   (* generate simple preview *)
   let pic = get_cache idx in
-  let w0,h0 = (widget_size scroller) in
-  scale_for_view ~target:(w0,h0) ~pic;
+  scale_for_view ~target:(view_size ()) ~pic;
   let pb = quick_view pic in
   image1#set_pixbuf pb;
-  let w1,h1 = pixbuf_size pb in
+(*  let w1,h1 = pixbuf_size pb in
   let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
-  spread#move image1#coerce w_off h_off;
+  spread#move image1#coerce w_off h_off; *)
 
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
@@ -450,13 +441,12 @@ let rec display1 idx =
 and display2 idx1 idx2 = 
   (* generate simple preview *)
   let pic1 = get_cache idx1 and pic2 = get_cache idx2 in
-  let w0,h0 = (widget_size scroller) in
-  scale2_for_view ~target:(w0,h0) ~pic1 ~pic2;
+  scale2_for_view ~target:(view_size ()) ~pic1 ~pic2;
   let pb = quick_view2 pic1 pic2 in
   image1#set_pixbuf pb;
-  let w1,h1 = pixbuf_size pb in
+(*  let w1,h1 = pixbuf_size pb in
   let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
-  spread#move image1#coerce w_off h_off;
+  spread#move image1#coerce w_off h_off;*)
 
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
@@ -467,29 +457,21 @@ and display2 idx1 idx2 =
   set_to_update := [pic1; pic2];
 
   ignore (Glib.Main.iteration true)
-(*  target_size := widget_size ~cap:200 spread;
-  let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
 
 let show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
   if can_twopage !image_idx then (
     set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
-    image2#misc#show ();
     if opt.manga then
       display2 (!image_idx+1) !image_idx
     else
       display2 !image_idx (!image_idx+1);
-(*    let w1, h1 = widget_size image1 and w2,h2 = widget_size image2 in
-    spread#misc#set_size_request ~width:(w1+w2) ~height:(max h1 h2) (); *)
     window#set_title (Printf.sprintf "Image %d,%d of %d, Book %d of %d : %s"
 		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   ) else (
     set_status (Printf.sprintf "Displaying img %d" !image_idx);
-    image2#misc#hide ();
     display1 !image_idx;
-(*    let w1, h1 = widget_size image1 in
-    spread#misc#set_size_request ~width:w1 ~height:h1 ();*)
     window#set_title (Printf.sprintf "Image %d of %d, Book %d of %d: %s" 
 			!image_idx (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
   );
@@ -570,10 +552,10 @@ let zoom ar_val ar_func =
   opt.scale <-( match opt.scale with
 		    Fit -> Fixed_AR ar_val 
 		  | Fixed_AR ar -> ar_func ar);
-  let rescale idx = scale_for_view (widget_size spread) (get_cache idx)
-  in
-  rescale !image_idx; 
-  if can_twopage !image_idx then rescale (!image_idx+1)
+  if can_twopage !image_idx then 
+    scale2_for_view (view_size()) (get_cache !image_idx) (get_cache (!image_idx+1))
+  else 
+    scale_for_view (view_size()) (get_cache !image_idx)
 
 let zoom_out () = zoom 0.95 (fun ar -> Fixed_AR (ar *. 0.95))
 and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Fixed_AR (ar /. 0.95))
