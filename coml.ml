@@ -267,14 +267,12 @@ let remove_file idx =
 let rec load_cache idx = 
   try 
 set_status (Printf.sprintf "Loading img %d" idx);
-(*Printf.eprintf "L:%d=" idx;*)
     let pic = { 
       full = GdkPixbuf.from_file (get_page idx); 
       scaled = None; 
       t_size = None;
       on_update = None;
     } in
-(*Printf.eprintf "%dx%d  " (fst (pixbuf_size cb.full)) (snd (pixbuf_size cb.full));*)
     set_cache idx (Entry pic)
   with GdkPixbuf.GdkPixbufError(_,msg) ->
 (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
@@ -315,8 +313,6 @@ let preload_cache () = for i = image_cache.pos to cache_last_idx () do preload_p
 
 let set_to_update = ref []
 
-(*let on_screen pic = List.memq pic !set_to_update *)
-
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
 let lacks_size size = function None -> true | Some pb -> size_diff (pixbuf_size pb) size
 let lacks_t_size pic =
@@ -330,8 +326,6 @@ let scale_factor (wt,ht) (wi, hi) =
   let ar_t = wt /. ht and ar_i = wi /. hi in
   if ar_t > ar_i then ht /. hi else wt /. wi
 
-
-    
 let set_t_size pic size = 
   let scale_pic_idle () = 
     begin 
@@ -342,7 +336,6 @@ let set_t_size pic size =
 	    let scaled = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
 	    GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
 	    pic.scaled <- Some scaled;
-	    (*	  if !idle_fill then raise (Cache_modified pic) *)
 	    match pic.on_update with None -> () | Some f -> f ()
     end; false
   in
@@ -355,7 +348,7 @@ let scale_for_view ~target ~pic =
     | Fixed_AR ar -> ar
   in
   let target_size = scale (full_size pic) ar in
-  set_t_size pic target_size (* sets t_size used in quick_view *)
+  set_t_size pic target_size
     
 let scale2_for_view ~target ~pic1 ~pic2 =
   let ts1,ts2 = match opt.scale with
@@ -377,8 +370,6 @@ Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
   in
   set_t_size pic1 ts1; set_t_size pic2 ts2
 
-(* let reset_cache idx = if within_cache_range idx then set_cache idx cache_null *)
-
 let quick_view pic = 
   let (width, height) = match pic.t_size with None -> assert false | Some s -> s in
   if lacks_size (width, height) pic.scaled 
@@ -387,6 +378,7 @@ let quick_view pic =
     GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pic.full;
     out_b
   else match pic.scaled with None -> assert false | Some pb -> pb
+
 and quick_view2 pic1 pic2 = 
   set_status ("quick_view start");
   let (w1,h1) = match pic1.t_size with None -> assert false | Some s -> s in
@@ -412,23 +404,15 @@ and quick_view2 pic1 pic2 =
   end;
   set_status ("quick_view end");
   out_b
-(*  let h_off1 = (h0-h1) / 2 and h_off2 = (h0-h2) / 2 in
-  spread#move image1#coerce 0 h_off1;
-  spread#move image2#coerce w1 h_off2; *)
 
-let show_task = ref None
-
-
-
+(* generate simple preview *)
 let rec display1 idx = 
-  (* generate simple preview *)
   let pic = get_cache idx in
-  scale_for_view ~target:(view_size ()) ~pic;
-  let pb = quick_view pic in
-  image1#set_pixbuf pb;
-(*  let w1,h1 = pixbuf_size pb in
-  let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
-  spread#move image1#coerce w_off h_off; *)
+
+  (* sets t_size used in quick_view *)
+  scale_for_view ~target:(view_size ()) ~pic;  
+
+  image1#set_pixbuf (quick_view pic);
 
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
@@ -437,16 +421,16 @@ let rec display1 idx =
   (* record which to clear *)
   set_to_update := [pic];
 
+  (* draw the screen *)
   ignore (Glib.Main.iteration true)
+
 and display2 idx1 idx2 = 
-  (* generate simple preview *)
   let pic1 = get_cache idx1 and pic2 = get_cache idx2 in
+
+  (* sets t_size used in quick_view *)
   scale2_for_view ~target:(view_size ()) ~pic1 ~pic2;
-  let pb = quick_view2 pic1 pic2 in
-  image1#set_pixbuf pb;
-(*  let w1,h1 = pixbuf_size pb in
-  let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
-  spread#move image1#coerce w_off h_off;*)
+
+  image1#set_pixbuf (quick_view2 pic1 pic2);
 
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
@@ -458,8 +442,9 @@ and display2 idx1 idx2 =
 
   ignore (Glib.Main.iteration true)
 
+let show_task = ref None
+
 let show_spread' () =
-(*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
   if can_twopage !image_idx then (
     set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
@@ -477,7 +462,6 @@ let show_spread' () =
   );
   show_task := None;
   false
-    (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
 let show_spread () = 
   match !show_task with
@@ -527,7 +511,6 @@ let toggle_fullscreen () =
     opt.fullscreen <- true;
     window#fullscreen ();
    );
-(*  spread#misc#set_size_request ~width:(Gdk.Screen.width ()) ~height:(Gdk.Screen.height ()) (); *)
   show_spread ()
 
 let toggle_twopage () =
