@@ -338,53 +338,56 @@ let scale_factor (wt,ht) (wi, hi) =
   let ar_t = wt /. ht and ar_i = wi /. hi in
   if ar_t > ar_i then ht /. hi else wt /. wi
 
-let scaled_size ~target ~image =
+
+    
+let set_t_size pic size = 
+  let scale_pic_idle () = 
+    begin 
+      match lacks_t_size pic with
+	  None -> ()
+	| Some (width,height) ->
+	    set_status (Printf.sprintf "Resizing img to %dx%d" width height);
+	    let scaled = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
+	    GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
+	    pic.scaled <- Some scaled;
+	    (*	  if !idle_fill then raise (Cache_modified pic) *)
+	    match pic.on_update with None -> () | Some f -> f ()
+    end; false
+  in
+  pic.t_size <- Some size;
+  ignore (Idle.add ~prio:scale_prio scale_pic_idle)
+
+let scale_for_view ~target ~pic =
   let ar = match opt.scale with
-    | Fit -> min 1.0 (scale_factor target image)
+    | Fit -> min 1.0 (scale_factor target (full_size pic))
     | Fixed_AR ar -> ar
   in
-  scale image ar
+  let target_size = scale (full_size pic) ar in
+  set_t_size pic target_size (* sets t_size used in quick_view *)
     
-let scaled_pair ~target ~image1 ~image2 =
-  match opt.scale with
+let scale2_for_view ~target ~pic1 ~pic2 =
+  let ts1,ts2 = match opt.scale with
       Fit -> 
 	let w0,h0 = target in
-	let w1,h1 = image1 and w2,h2 = image2 in
+	let w1,h1 = full_size pic1 and w2,h2 = full_size pic2 in
 Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
 	let tar_w = min 1.0 ((float_of_int w0) /. (float_of_int (w1 + w2))) in
 	if h1 = h2 then 
 	  let tar_h = (float_of_int h0) /. (float_of_int h1) in
 	  let ar = min tar_w tar_h in
-	  (scale image1 ar, scale image2 ar)
+	  (scale (w1,h1) ar, scale (w2,h2) ar)
 	else
 	  let tar_h1 = (float_of_int h0) /. (float_of_int h1)
 	  and tar_h2 = (float_of_int h0) /. (float_of_int h2) in
 	  let ar1 = min tar_w tar_h1 and ar2 = min tar_w tar_h2 in
-	  (scale image1 ar1, scale image2 ar2)
-    | Fixed_AR ar -> (scale image1 ar, scale image2 ar)
-	
-let reset_cache idx = if within_cache_range idx then set_cache idx cache_null
+	  (scale (w1,h1) ar1, scale (w2,h2) ar2)
+    | Fixed_AR ar -> (scale (full_size pic1) ar, scale (full_size pic2) ar)
+  in
+  set_t_size pic1 ts1; set_t_size pic2 ts2
 
-let show_task = ref None
+(* let reset_cache idx = if within_cache_range idx then set_cache idx cache_null *)
 
-let rec scale_cache_idle pic () = 
-  begin try 
-    match lacks_t_size pic with
-	None -> ()
-      | Some (width,height) ->
-	  set_status (Printf.sprintf "Resizing img to %dx%d" width height);
-	  let scaled = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
-	  GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
-	  pic.scaled <- Some scaled;
-(*	  if !idle_fill then raise (Cache_modified pic) *)
-	  match pic.on_update with None -> () | Some f -> f ()
-  with Not_found -> ()
-  end; false
-    
-and idle_scale pic size = 
-  pic.t_size <- Some size;
-  ignore (Idle.add ~prio:scale_prio (scale_cache_idle pic))
-and quick_view pic = 
+let quick_view pic = 
   let (width, height) = match pic.t_size with None -> assert false | Some s -> s in
   if lacks_size (width, height) pic.scaled 
   then     
@@ -420,14 +423,19 @@ and quick_view2 pic1 pic2 =
 (*  let h_off1 = (h0-h1) / 2 and h_off2 = (h0-h2) / 2 in
   spread#move image1#coerce 0 h_off1;
   spread#move image2#coerce w1 h_off2; *)
-and display1 idx = 
+
+let show_task = ref None
+
+
+
+let rec display1 idx = 
   (* generate simple preview *)
   let pic = get_cache idx in
   let w0,h0 = (widget_size scroller) in
-  let w1,h1 = scaled_size ~target:(w0,h0) ~image:(full_size pic) in
-  idle_scale pic (w1,h1); (* sets t_size used in quick_view *)
+  scale_for_view ~target:(w0,h0) ~pic;
   let pb = quick_view pic in
   image1#set_pixbuf pb;
+  let w1,h1 = pixbuf_size pb in
   let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
   spread#move image1#coerce w_off h_off;
 
@@ -443,11 +451,12 @@ and display2 idx1 idx2 =
   (* generate simple preview *)
   let pic1 = get_cache idx1 and pic2 = get_cache idx2 in
   let w0,h0 = (widget_size scroller) in
-  let (w1,h1), (w2,h2) = scaled_pair ~target:(w0,h0) ~image1:(full_size pic1) ~image2:(full_size pic2) in
-  idle_scale pic1 (w1,h1); idle_scale pic2 (w2,h2);
+  scale2_for_view ~target:(w0,h0) ~pic1 ~pic2;
   let pb = quick_view2 pic1 pic2 in
   image1#set_pixbuf pb;
-  spread#move image1#coerce 0 0;
+  let w1,h1 = pixbuf_size pb in
+  let h_off = (h0 - h1) / 2 and w_off = (w0 - w1) / 2 in
+  spread#move image1#coerce w_off h_off;
 
   (* clear old update functions *)
   List.iter (fun p -> p.on_update <- None) !set_to_update;
@@ -461,7 +470,7 @@ and display2 idx1 idx2 =
 (*  target_size := widget_size ~cap:200 spread;
   let scl_size = scaled_size ~target:!target_size ~image:(full_size pic) in*)
 
-and show_spread' () =
+let show_spread' () =
 (*   failwith ("width=" ^ string_of_int width ^ " height=" ^ string_of_int height);*) 
   file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
   if can_twopage !image_idx then (
@@ -488,7 +497,7 @@ and show_spread' () =
   false
     (*  window#resize ~width:(max width 260) ~height:(height + 40)*)
 
-and show_spread () = 
+let show_spread () = 
   match !show_task with
       None -> 
 	show_task := Some (Idle.add ~prio:show_prio show_spread')
@@ -532,7 +541,6 @@ let toggle_fullscreen () =
   if opt.fullscreen then (
     opt.fullscreen <- false;
     window#unfullscreen ();
-
    ) else (
     opt.fullscreen <- true;
     window#fullscreen ();
@@ -562,10 +570,7 @@ let zoom ar_val ar_func =
   opt.scale <-( match opt.scale with
 		    Fit -> Fixed_AR ar_val 
 		  | Fixed_AR ar -> ar_func ar);
-  let rescale idx = 
-    let pic = get_cache idx in
-    let target_size = scaled_size (widget_size spread) (full_size pic) in
-    idle_scale pic target_size
+  let rescale idx = scale_for_view (widget_size spread) (get_cache idx)
   in
   rescale !image_idx; 
   if can_twopage !image_idx then rescale (!image_idx+1)
