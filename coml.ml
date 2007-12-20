@@ -32,7 +32,7 @@ let opt = { wrap = false; fullscreen = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
-let preload_prio = 150 and show_prio = 115 and scale_prio = 200
+let preload_prio = 150 and show_prio = 115 and scale_prio = 200 and prescale_prio = 190
 
 
 type book = { path : string; mutable files: string array }
@@ -315,7 +315,7 @@ let set_to_update = ref []
 
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
 let lacks_size size = function None -> true | Some pb -> size_diff (pixbuf_size pb) size
-let lacks_t_size pic =
+let rescale_size pic =
   match pic.t_size with 
     | None -> None
     | Some s -> if lacks_size s pic.scaled then Some s else None
@@ -329,7 +329,7 @@ let scale_factor (wt,ht) (wi, hi) =
 let set_t_size pic size = 
   let scale_pic_idle () = 
     begin 
-      match lacks_t_size pic with
+      match rescale_size pic with
 	  None -> ()
 	| Some (width,height) ->
 	    set_status (Printf.sprintf "Resizing img to %dx%d" width height);
@@ -370,6 +370,32 @@ Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
   in
   set_t_size pic1 ts1; set_t_size pic2 ts2
 
+let prescale_cache () = 
+  let rec scale_loop can_exit i = 
+    if can_exit i then false (* for the Idle loop *) else
+    if can_twopage i then (
+      set_status (Printf.sprintf "Prescaling %d, %d" i (i+1));
+      scale2_for_view (view_size ()) (get_cache i) (get_cache (i+1));
+      scale_loop can_exit (i+2)
+    ) else (
+      set_status (Printf.sprintf "Prescaling %d" i);
+      scale_for_view (view_size ()) (get_cache i);
+      scale_loop can_exit (i+1)
+    )
+  in
+(* run task after all loading complete *)
+  let scale_after_current () = 
+    let end_when i = i >= cache_last_idx ()
+    and start_i = !image_idx + List.length !set_to_update in
+    scale_loop end_when start_i
+  and scale_before_current () =
+    let end_when i = i >= !image_idx
+    and start_i = image_cache.pos in
+    scale_loop end_when start_i
+  in
+  ignore(Idle.add ~prio:prescale_prio scale_after_current);
+  ignore(Idle.add ~prio:(prescale_prio+1) scale_before_current)
+
 let quick_view pic = 
   let (width, height) = match pic.t_size with None -> assert false | Some s -> s in
   if lacks_size (width, height) pic.scaled 
@@ -380,7 +406,6 @@ let quick_view pic =
   else match pic.scaled with None -> assert false | Some pb -> pb
 
 and quick_view2 pic1 pic2 = 
-  set_status ("quick_view start");
   let (w1,h1) = match pic1.t_size with None -> assert false | Some s -> s in
   let (w2,h2) = match pic2.t_size with None -> assert false | Some s -> s in
   let out_w = w1+w2 and out_h = max h1 h2 in
@@ -402,7 +427,6 @@ and quick_view2 pic1 pic2 =
       | Some pb ->
 	  GdkPixbuf.copy_area ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2~height:h2 pb;
   end;
-  set_status ("quick_view end");
   out_b
 
 (* generate simple preview *)
@@ -473,6 +497,7 @@ let new_pos idx =
     image_idx := idx;
     recenter_cache !image_idx;
     preload_cache ();
+    prescale_cache ();
     show_spread ()
 
 let first_image () = set_status "At beginning of book"; new_pos 0
@@ -520,6 +545,7 @@ let toggle_twopage () =
   cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
   recenter_cache !image_idx;
   preload_cache ();
+  prescale_cache ();
   show_spread ()
 
 let toggle_manga () =
@@ -595,6 +621,7 @@ let main () =
   show_spread ();
   window#show ();
   preload_cache ();
+  prescale_cache ();
   Main.main ()
     
 let _ = main ()
