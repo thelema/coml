@@ -63,8 +63,8 @@ let numeric_compare s1 s2 =
     end
 
 let push_books path files = 
-  if Array.length files > 0 then 
-    Array.sort numeric_compare files;
+  if List.length files > 0 then 
+    let files = files |>  List.sort numeric_compare |> Array.of_list in
     Stack.push {path=path; files=files} books.next
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
@@ -98,7 +98,6 @@ let rec rec_del path =
 		  else remove fn)
   (*remove path*)
 
-
 let rec build_books = function 
     [] -> () 
   | h :: t when not (Sys.file_exists h) -> build_books t
@@ -115,16 +114,16 @@ let rec build_books = function
 	build_books (td::t)
       end else
 	build_books t
-  | h :: t as l -> 
+  | h :: t as l when is_picture h -> 
       let p1 = Filename.dirname h in 
       let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
       b1 |>
 	List.filter Sys.file_exists |>
 	List.map Filename.basename |>
 	List.filter is_picture |>
-	Array.of_list |>
 	push_books p1;
       build_books rest
+  | h :: t (* garbage file? *) -> build_books t
 
 let current_book () = Stack.top books.next
 let max_index () = Array.length (current_book()).files - 1
@@ -243,7 +242,6 @@ let prev_book () =
   let cur = Stack.pop books.prev in
   Stack.push cur books.next; 
   reset_cache_all ()
-
 
 let scale (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
@@ -385,7 +383,7 @@ let prescale_cache () =
   in
 (* run task after all loading complete *)
   let scale_after_current () = 
-    let end_when i = i >= cache_last_idx ()
+    let end_when i = i > cache_last_idx ()
     and start_i = !image_idx + List.length !set_to_update in
     scale_loop end_when start_i
   and scale_before_current () =
@@ -396,14 +394,21 @@ let prescale_cache () =
   ignore(Idle.add ~prio:prescale_prio scale_after_current);
   ignore(Idle.add ~prio:(prescale_prio+1) scale_before_current)
 
+let scale_or_copy pic scaler copier = 
+  let t_size = match pic.t_size with None -> assert false | Some s -> s in
+  match pic.scaled with
+      None -> scaler pic.full
+    | Some pb when size_diff t_size (pixbuf_size pb) -> scaler pic.full
+    | Some pb (* scaled image has right size *) -> copier pb
+
 let quick_view pic = 
   let (width, height) = match pic.t_size with None -> assert false | Some s -> s in
-  if lacks_size (width, height) pic.scaled 
-  then     
+  let scaler pb = 
     let out_b = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
-    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pic.full;
+    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST pb;
     out_b
-  else match pic.scaled with None -> assert false | Some pb -> pb
+  in
+  scale_or_copy pic scaler (fun pb -> pb)
 
 and quick_view2 pic1 pic2 = 
   let (w1,h1) = match pic1.t_size with None -> assert false | Some s -> s in
@@ -413,20 +418,12 @@ and quick_view2 pic1 pic2 =
   and out_alpha = (GdkPixbuf.get_has_alpha pic1.full) || (GdkPixbuf.get_has_alpha pic2.full) in
   let out_b = GdkPixbuf.create ~width:out_w ~height:out_h
     ~bits:out_bits ~has_alpha:out_alpha () in
-  if lacks_size (w1,h1) pic1.scaled then
-    GdkPixbuf.scale ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 ~interp:`NEAREST pic1.full
-  else begin
-    match pic1.scaled with None -> assert false 
-      | Some pb ->
-	  GdkPixbuf.copy_area ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 pb;
-  end;
-  if lacks_size (w2,h2) pic2.scaled then 
-    GdkPixbuf.scale ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2 ~height:h2 ~ofs_x:(float w1) ~scale_x:(float w1 /. float (GdkPixbuf.get_width pic2.full)) ~interp:`NEAREST pic2.full
-  else begin
-    match pic2.scaled with None -> assert false 
-      | Some pb ->
-	  GdkPixbuf.copy_area ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2~height:h2 pb;
-  end;
+  let scaler1 pb = GdkPixbuf.scale ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 ~interp:`NEAREST pb
+  and copier1 pb = GdkPixbuf.copy_area ~dest:out_b ~dest_x:0 ~dest_y:0 ~width:w1 ~height:h1 pb
+  and scaler2 pb = GdkPixbuf.scale ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2 ~height:h2 ~ofs_x:(float w1) ~scale_x:(float w1 /. float (GdkPixbuf.get_width pic2.full)) ~interp:`NEAREST pb
+  and copier2 pb = GdkPixbuf.copy_area ~dest:out_b ~dest_x:w1 ~dest_y:0 ~width:w2 ~height:h2 pb in
+  scale_or_copy pic1 scaler1 copier1;
+  scale_or_copy pic2 scaler2 copier2;
   out_b
 
 (* generate simple preview *)
@@ -506,34 +503,34 @@ let last_image () = set_status "At end of book"; new_pos (if can_twopage (max_in
 
 let past_end () = 
   if opt.wrap then first_image () else
-  if Stack.length books.next <= 1 then set_status "At end of Library"
-  else begin next_book (); first_image () end
+    if Stack.length books.next <= 1 
+    then (last_image (); set_status "At end of Library")
+    else (next_book (); first_image () )
 
 let past_start () = 
   if opt.wrap then last_image () else
-  if Stack.length books.prev < 1 then set_status "At start of Library"
-  else begin prev_book (); last_image () end
+    if Stack.length books.prev < 1 
+    then ( first_image (); set_status "At start of Library" )
+    else ( prev_book (); last_image ())
 
 let prev_image () =
   let movement = if can_twopage (max (!image_idx-2) 0) then 2 else 1 in
-set_status (Printf.sprintf "Going back %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
-
   if !image_idx - movement < 0 then past_start ()
   else new_pos (!image_idx - movement)
     
 let next_image () =
-  let movement = if can_twopage !image_idx then 2 else 1 in
-set_status (Printf.sprintf "Going forward %s @ %d" (if movement = 2 then "two pages" else "one page")!image_idx);
-  
+  let movement = List.length !set_to_update in
   if !image_idx + movement > max_index () then past_end ()
   else new_pos (!image_idx + movement)
     
 let toggle_fullscreen () =
   if opt.fullscreen then (
     opt.fullscreen <- false;
+    footer#misc#show ();
     window#unfullscreen ();
    ) else (
     opt.fullscreen <- true;
+    footer#misc#hide ();
     window#fullscreen ();
    );
   show_spread ()
@@ -599,8 +596,10 @@ let resized event =
 
 let main () =
   Random.self_init ();
-  build_books (Sys.argv |> Array.to_list |> List.tl |> List.rev);
-  if max_index () = 0 then begin
+  let arg_list = Sys.argv |> Array.to_list |> List.tl in
+  let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
+  build_books (arg_list |> List.rev);
+  if Stack.is_empty books.next || max_index () = 0 then begin
     Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
   end;
@@ -622,6 +621,6 @@ let main () =
   window#show ();
   preload_cache ();
   prescale_cache ();
-  Main.main ()
+  Main.main () (* calls the GTK main event loop *)
     
 let _ = main ()
