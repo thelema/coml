@@ -12,6 +12,8 @@
 
 let opt_default opt def = match opt with Some v -> v | None -> def
 let (|>) x f = f x
+
+let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
    
 open GMain
    
@@ -35,10 +37,10 @@ let opt = { wrap = false; fullscreen = false;
 let preload_prio = 150 and show_prio = 115 and scale_prio = 200 and prescale_prio = 190
 
 
-type book = { path : string; mutable files: string array }
+type book = { title: string; mutable files: string array }
 type library = {prev : book Stack.t; next : book Stack.t}
-let books = {prev=Stack.create ();
-	     next=Stack.create ()}
+let books = { prev=Stack.create ();
+	      next=Stack.create () }
 
 let numeric_compare s1 s2 = 
   let l1 = String.length s1 and l2 = String.length s2 in
@@ -62,10 +64,10 @@ let numeric_compare s1 s2 =
       Int64.compare n1 n2
     end
 
-let push_books path files = 
+let push_books title files = 
   if List.length files > 0 then 
     let files = files |>  List.sort numeric_compare |> Array.of_list in
-    Stack.push {path=path; files=files} books.next
+    Stack.push {title=title; files=files} books.next
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -86,44 +88,60 @@ let extract_archive file dir =
   match archive_type file with
     | `Rar -> Sys.command (Printf.sprintf "rar x \"%s\" \"%s\"/" file dir)
     | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
-    | `Sev_zip -> 255
+    | `Sev_zip -> Sys.command (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
 
 let rec rec_del path = 
-  let remove fn = (*Printf.eprintf "Removing: %s"*) Sys.remove fn in
+  let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
   Sys.readdir path
     |> Array.map (fun fn -> Filename.concat path fn)
-    |> Array.iter (fun fn -> if Sys.is_directory fn
-		  then rec_del fn
-		  else remove fn)
-  (*remove path*)
+    |> Array.iter (fun fn -> if is_directory fn
+		   then rec_del fn
+		   else remove fn);
+    Unix.rmdir path
 
-let rec build_books = function 
-    [] -> () 
-  | h :: t when not (Sys.file_exists h) -> build_books t
-  | h :: t when Sys.is_directory h ->
-      let files = Sys.readdir h in
-      build_books (t @ (List.map (Filename.concat h) (Array.to_list files)))
-  | h :: t when is_archive h ->
+let build_books l = 
+  let files_in path = assert (is_directory path); Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
+  let rec expand_list acc = function
+      [] -> acc
+    | h :: t when not (Sys.file_exists h) -> expand_list acc t
+    | h :: t when is_directory h ->
+	let title = Filename.basename h in
+	let book = files_in h |> List.map (fun fn -> title,fn) in
+	expand_list (List.rev_append book acc) t
+    | h :: t when is_archive h ->
       let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
       (* extract archive to td *)
       let return_code = extract_archive h td in
+      (* on quit, remove the extracted archive *)
+      at_exit (fun () -> rec_del td);
       if return_code = 0 && Sys.file_exists td then begin
-	at_exit (fun () -> rec_del td);
-	(* on quit, remove the extracted archive *)
-	build_books (td::t)
-      end else
-	build_books t
-  | h :: t as l when is_picture h -> 
-      let p1 = Filename.dirname h in 
-      let b1, rest = List.partition (fun f -> Filename.dirname f = p1) l in
-      b1 |>
-	List.filter Sys.file_exists |>
-	List.map Filename.basename |>
-	List.filter is_picture |>
-	push_books p1;
-      build_books rest
-  | h :: t (* garbage file? *) -> build_books t
+	let contents = files_in td in
+	let dirs,files = List.partition is_directory contents
+	and title = Filename.basename h in
+(*Printf.eprintf "Title:%s\nFiles:\n" title;
+List.iter (Printf.eprintf "%s\n") files;
+Printf.eprintf "Dirs:\n";
+List.iter (Printf.eprintf "%s\n") dirs;
+Printf.eprintf "Contents:\n";
+List.iter (Printf.eprintf "%s\n") contents;*)
+	let acc' = files |> List.map (fun fn -> title,fn) |> List.append acc
+	and t' = List.rev_append dirs t in
+	  expand_list acc' t'
+      end else 
+	expand_list acc t
+    | h :: t when is_picture h ->
+	expand_list ((Filename.basename h,h)::acc) t
+    | _ :: t -> (* garbage file *)
+	expand_list acc t
+  and group_books = function
+      [] -> ()
+    | (n1,p1)::t as l ->
+	let b1,rest = List.partition (fun (n,_) -> n = n1) l in
+	push_books n1 (b1|> List.rev_map snd);
+	group_books rest
+  in
+  l |> expand_list [] |> group_books 
 
 let current_book () = Stack.top books.next
 let max_index () = Array.length (current_book()).files - 1
@@ -131,8 +149,7 @@ let max_index () = Array.length (current_book()).files - 1
 let book_count () = Stack.length books.next + Stack.length books.prev
 and cur_book_number () = Stack.length books.prev + 1
 
-let get_page idx = 
-  let cb = current_book () in Filename.concat cb.path cb.files.(idx)
+let get_page idx = (current_book ()).files.(idx)
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
@@ -154,7 +171,7 @@ let pixbuf_size pix =
   and h = GdkPixbuf.get_height pix in
   (w,h)
 
-type pic = { full: GdkPixbuf.pixbuf; 
+type pic = { full: GdkPixbuf.pixbuf; idx: int;
 	     mutable scaled: GdkPixbuf.pixbuf option; 
 	     mutable t_size: (int * int) option;
 	     mutable on_update : (unit -> unit) option }
@@ -163,7 +180,7 @@ type cache = {mutable pos: int; mutable pics: file array}
 let cache_past = ref 1 and cache_future = ref 1
 let cache_size () = !cache_past + !cache_future + 1
 let cache_null = Not_loaded
-let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); 
+let failed_load = { scaled = Some (GdkPixbuf.create 1 1 ()); idx = -1;
 		    full = GdkPixbuf.create 1 1 ();
 		    t_size = Some (1,1) ;
 		    on_update = None }
@@ -194,7 +211,7 @@ let is_vert idx =
 let can_twopage idx =
   try 
     opt.twopage && is_vert idx && idx < max_index () && is_vert (idx + 1)
-  with Not_found -> false
+  with Not_found -> true (* is_vert throws when pic not loaded *)
 
 let status_to_string entry = match entry.scaled with Some _ -> "S" | None -> "F"
 
@@ -267,6 +284,7 @@ let rec load_cache idx =
 set_status (Printf.sprintf "Loading img %d" idx);
     let pic = { 
       full = GdkPixbuf.from_file (get_page idx); 
+      idx = idx; 
       scaled = None; 
       t_size = None;
       on_update = None;
@@ -312,11 +330,7 @@ let preload_cache () = for i = image_cache.pos to cache_last_idx () do preload_p
 let set_to_update = ref []
 
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
-let lacks_size size = function None -> true | Some pb -> size_diff (pixbuf_size pb) size
-let rescale_size pic =
-  match pic.t_size with 
-    | None -> None
-    | Some s -> if lacks_size s pic.scaled then Some s else None
+let has_size size = function None -> true | Some pb -> not (size_diff (pixbuf_size pb) size)
 
 let scale_factor (wt,ht) (wi, hi) =
   let wt = float_of_int wt and ht = float_of_int ht
@@ -327,19 +341,25 @@ let scale_factor (wt,ht) (wi, hi) =
 let set_t_size pic size = 
   let scale_pic_idle () = 
     begin 
-      match rescale_size pic with
-	  None -> ()
+      match pic.t_size with
+	  None -> assert false (* must have target size *)
 	| Some (width,height) ->
-	    set_status (Printf.sprintf "Resizing img to %dx%d" width height);
+	    set_status (Printf.sprintf "Resizing img %d to %dx%d" pic.idx width height);
 	    let scaled = GdkPixbuf.create ~width ~height ~bits:(GdkPixbuf.get_bits_per_sample pic.full) ~has_alpha:(GdkPixbuf.get_has_alpha pic.full) () in
 	    GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER pic.full;
 	    pic.scaled <- Some scaled;
 	    match pic.on_update with None -> () | Some f -> f ()
     end; false
   in
-  pic.t_size <- Some size;
-  ignore (Idle.add ~prio:scale_prio scale_pic_idle)
-
+  match pic.t_size with 
+    | None ->
+	pic.t_size <- Some size;
+	ignore (Idle.add ~prio:scale_prio scale_pic_idle)
+    | Some s when size_diff s size ->
+	pic.t_size <- Some size;
+	ignore (Idle.add ~prio:scale_prio scale_pic_idle)
+    | Some _ (* target already set to size *) -> ()
+	    
 let scale_for_view ~target ~pic =
   let ar = match opt.scale with
     | Fit -> min 1.0 (scale_factor target (full_size pic))
@@ -353,7 +373,6 @@ let scale2_for_view ~target ~pic1 ~pic2 =
       Fit -> 
 	let w0,h0 = target in
 	let w1,h1 = full_size pic1 and w2,h2 = full_size pic2 in
-Printf.eprintf "Fitting %dx%d and %dx%d into %dx%d\n" w1 h1 w2 h2 w0 h0;
 	let tar_w = min 1.0 ((float_of_int w0) /. (float_of_int (w1 + w2))) in
 	if h1 = h2 then 
 	  let tar_h = (float_of_int h0) /. (float_of_int h1) in
@@ -372,11 +391,9 @@ let prescale_cache () =
   let rec scale_loop can_exit i = 
     if can_exit i then false (* for the Idle loop *) else
     if can_twopage i then (
-      set_status (Printf.sprintf "Prescaling %d, %d" i (i+1));
       scale2_for_view (view_size ()) (get_cache i) (get_cache (i+1));
       scale_loop can_exit (i+2)
     ) else (
-      set_status (Printf.sprintf "Prescaling %d" i);
       scale_for_view (view_size ()) (get_cache i);
       scale_loop can_exit (i+1)
     )
@@ -466,25 +483,19 @@ and display2 idx1 idx2 =
 let show_task = ref None
 
 let show_spread' () =
-  file#set_text (try Glib.Convert.filename_to_utf8 (get_page !image_idx) with Glib.Convert.Error (_,s) -> s);
-  if can_twopage !image_idx then (
-    set_status (Printf.sprintf "Displaying img %d,%d" !image_idx (!image_idx+1));
+  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !image_idx)) with Glib.Convert.Error (_,s) -> s);
+  if can_twopage !image_idx then
     if opt.manga then
       display2 (!image_idx+1) !image_idx
     else
-      display2 !image_idx (!image_idx+1);
-    window#set_title (Printf.sprintf "Image %d,%d of %d, Book %d of %d : %s"
-		      !image_idx (!image_idx+1) (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
-  ) else (
-    set_status (Printf.sprintf "Displaying img %d" !image_idx);
+      display2 !image_idx (!image_idx+1)
+  else
     display1 !image_idx;
-    window#set_title (Printf.sprintf "Image %d of %d, Book %d of %d: %s" 
-			!image_idx (max_index()) (cur_book_number ()) (book_count()) (current_book()).path);
-  );
   show_task := None;
   false
-
+    
 let show_spread () = 
+  window#set_title (Printf.sprintf "Image_idx %d of %d, Book %d of %d : %s" (!image_idx+1) (max_index() + 1) (cur_book_number ()) (book_count()) (current_book()).title);
   match !show_task with
       None -> 
 	show_task := Some (Idle.add ~prio:show_prio show_spread')
@@ -569,7 +580,7 @@ and toggle_zoom () = zoom 1.0 (fun _ -> Fit)
   
 open GdkKeysyms
 
-let acts = [(_q, Main.quit);
+let actions = [(_q, Main.quit);
 	    (_Left, prev_image); (_Up, prev_image); (_BackSpace, prev_image);
 	    (_Right, next_image); (_Down, next_image); (_space, next_image);
 	    (_f, toggle_fullscreen); (_t, toggle_twopage);
@@ -581,9 +592,12 @@ let acts = [(_q, Main.quit);
 	   ]
 
 let handle_key event =
-  let kv = GdkEvent.Key.keyval event in
   try 
-    (List.assoc kv acts) (); true
+    let kv = GdkEvent.Key.keyval event in
+    (* look up the key value in the actions list *)
+    let action = List.assoc kv actions in
+      action ();
+      true
   with Not_found -> false
 
 let resized event =
@@ -593,12 +607,11 @@ let resized event =
   show_spread ();
   false
   
-
 let main () =
   Random.self_init ();
   let arg_list = Sys.argv |> Array.to_list |> List.tl in
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
-  build_books (arg_list |> List.rev);
+  build_books arg_list;
   if Stack.is_empty books.next || max_index () = 0 then begin
     Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
