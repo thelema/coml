@@ -209,7 +209,7 @@ let recenter_cache ctr =
 set_status (Printf.sprintf "Recentering cache to %d" ctr);
    let new_pos = max (ctr - !cache_past) 0 in
 (*   Printf.eprintf "pos: %d new_pos: %d\n" image_cache.pos new_pos;*)
-   print_cache ();
+(*   print_cache ();*)
    let ic = image_cache.pics in
    let ic2 = Array.make (cache_size ()) cache_null in
    let new_size = Array.length ic2 and old_size = Array.length ic in
@@ -217,7 +217,7 @@ set_status (Printf.sprintf "Recentering cache to %d" ctr);
    and new_start, new_end = new_pos, new_pos + new_size - 1 in
    let overlap_start = max old_start new_start
    and overlap_end = min old_end new_end in
-   Printf.eprintf "blit ic %d ic2 %d %d\n" (overlap_start-old_start) (overlap_start-new_start) (overlap_end - overlap_start + 1);
+(*   Printf.eprintf "blit ic %d ic2 %d %d\n" (overlap_start-old_start) (overlap_start-new_start) (overlap_end - overlap_start + 1); *)
    if overlap_start <= overlap_end then
      Array.blit ic (overlap_start-old_start) ic2 (overlap_start-new_start)
        (overlap_end - overlap_start + 1);
@@ -267,7 +267,7 @@ let rec load_cache idx =
       set_cache idx Failed
 	
 let get_cache idx = 
-Printf.eprintf "get_c %d\n" idx;
+(*Printf.eprintf "get_c %d\n" idx;*)
   if not (within_cache_range idx) then (* cache underflow *)
     recenter_cache [idx];
   try get_cache' idx 
@@ -295,7 +295,7 @@ let scale_factor (wt,ht) (wi, hi) =
   let ar_t = wt /. ht and ar_i = wi /. hi in
   if ar_t > ar_i then ht /. hi else wt /. wi
 
-let string_of_int_list prefix list = List.fold_left (fun acc i -> acc ^ "," ^ (string_of_int i)) prefix list
+let string_of_int_list prefix = function [] -> prefix ^ "EMPTY" | [i] -> prefix ^ (string_of_int i) | [i1;i2] -> prefix ^ (string_of_int i1) ^ "," ^ (string_of_int i2) | l -> List.fold_left (fun acc i -> acc ^ "," ^ (string_of_int i)) prefix l
 	    
 module Spread = struct 
   type t = { idxes: int list;
@@ -343,7 +343,6 @@ module Spread = struct
 
   let make ~target ~display idxes = 
     assert (idxes <> []);
-    set_status (string_of_int_list "Making spread for pages" idxes);
     let pics = idxes |> List.map get_cache in
     
     (* generate the pixbif *)
@@ -362,7 +361,7 @@ module Spread = struct
     in
     copier 0 pics;
     
-    set_status (Printf.sprintf "Made spread (%d,%d), %d bits, alpha %b" out_w out_h out_bits out_alpha);
+    set_status (Printf.sprintf "Made spread for pages [%s] (%d,%d), %d bits, alpha %b" (string_of_int_list "" idxes) out_w out_h out_bits out_alpha);
     (* make the t_size *)
     let ar = match opt.scale with
       | Fit -> min 1.0 (scale_factor target (out_w, out_h))
@@ -371,7 +370,7 @@ module Spread = struct
     let t_size = scale_wh (out_w, out_h) ar in
     
     let s = { idxes = idxes; pixbuf = out_b; 
-	      t_size = t_size; display = display idxes; scaler = None;
+	      t_size = t_size; display = display; scaler = None;
 	      bits = out_bits; alpha = out_alpha } in
     s.scaler <- Some (Idle.add ~prio:scale_prio (scale_idle s));
     show s;
@@ -393,35 +392,29 @@ let set_t_size size =
   Spread.scale ~size (get_scache_current ());
   SpreadCache.iter (Spread.scale ~size) sc
   
-(* generate simple preview *)
-let display idxes = 
-
-  try 
-    Spread.show (get_scache idxes);
-    ignore (Glib.Main.iteration true)
-  with
-      Not_found -> 
-	let spread = Spread.make ~target:(view_size ()) 
-	  ~display:(fun i p -> if i = !image_idxes then image1#set_pixbuf p) 
-	  idxes in
-	SpreadCache.add sc spread;
-	ignore (Glib.Main.iteration true)
-
-  (* draw the screen *)
-
-
 let show_task = ref None
 
 let show_spread' () =
-  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page (List.hd !image_idxes))) with Glib.Convert.Error (_,s) -> s);
-  !image_idxes |>
-      List.filter (fun i -> i < max_index()) |>
-	  display;
+  let idxes = !image_idxes in
+  let spread = 
+    try 
+      let s = get_scache idxes in Printf.eprintf "CACHE HIT\n"; s
+    with
+	Not_found -> 
+	  let display p = if idxes = !image_idxes then image1#set_pixbuf p in
+	  Spread.make ~target:(view_size ()) ~display idxes
+  in
+  Spread.show spread;
+  ignore (SpreadCache.merge sc spread);
+
+  (* draw the screen *)
+  ignore (Glib.Main.iteration true);
   show_task := None;
   false
     
 let show_spread () = 
   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (string_of_int_list "" !image_idxes) (max_index()) (cur_book_number ()) (book_count()) (current_book()).title);
+  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page (List.hd !image_idxes))) with Glib.Convert.Error (_,s) -> s);
   match !show_task with
       None -> 
 	show_task := Some (Idle.add ~prio:show_prio show_spread')
