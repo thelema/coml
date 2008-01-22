@@ -283,14 +283,23 @@ let preload_pic idx =
 
 let preload_cache () = for i = image_cache.pos to cache_last_idx () do preload_pic i done
 
-type spread = { idxes: int list;
-	        bits : int; (* bits per pixel*)
-		alpha : bool; (* true when alpha channel needed *)
-		mutable pixbuf: GdkPixbuf.pixbuf; 
-		mutable t_size: (int * int);
-		mutable on_update : (spread -> unit) option;
-		mutable scaler : Glib.Idle.id option;
-	      }
+
+module Spread = sig 
+  type t = { idxes: int list;
+	     bits : int; (* bits per pixel*)
+	     alpha : bool; (* true when alpha channel needed *)
+	     mutable pixbuf: GdkPixbuf.pixbuf; 
+	     mutable t_size: (int * int);
+	     mutable on_update : (spread -> unit) option;
+	     mutable scaler : Glib.Idle.id option;
+	   }
+ let equal a b = a.idxes = b.idxes && a.t_size = b.t_size
+ let hash a = Hashtbl.hash (a.idxes,a.t_size) 
+end
+
+module SpreadCache = Weak.Make(Spread)
+
+let sc = SpreadCache.create 3 
 
 let null_spread = { idxes = []; pixbuf = GdkPixbuf.create 1 1 (); t_size = (1,1); on_update = None; bits=8; alpha=false ; scaler=None}
 
@@ -415,7 +424,7 @@ let is_vert idx =
   let (w0,h0) = pixbuf_size (get_cache' idx) in
   w0 < h0
 
-let group_pages idx ~forward =
+let group_pages ~seed:idx ~forward =
   if not opt.twopage then [idx]
   else 
     let p1,p2 = if forward then idx, idx+1 else idx-1,idx in
@@ -424,9 +433,9 @@ let group_pages idx ~forward =
       else [p1]
     with Not_found -> [p1;p2]
 
-let first_image () = set_status "At beginning of book"; new_pos (group_pages 0 ~forward:true)
+let first_image () = set_status "At beginning of book"; new_pos (group_pages ~seed:0 ~forward:true)
 
-let last_image () = set_status "At end of book"; new_pos (group_pages (max_index ()) ~forward:false)
+let last_image () = set_status "At end of book"; new_pos (group_pages ~seed:(max_index ()) ~forward:false)
 
 let past_end () = 
   if opt.wrap then first_image () else
@@ -444,14 +453,22 @@ let prev_image () =
   let cur_min = List.fold_left min max_int !image_idxes in
   let seed_page = cur_min - 1 in
   if seed_page < 0 then past_start ()
-  else new_pos (group_pages seed_page ~forward:false)
+  else new_pos (group_pages ~seed:seed_page ~forward:false)
     
 let next_image () =
   let cur_max = List.fold_left max min_int !image_idxes in
   let seed_page = cur_max + 1 in
   if seed_page > max_index () then past_end ()
-  else new_pos (group_pages seed_page ~forward:true)
+  else new_pos (group_pages ~seed:seed_page ~forward:true)
     
+let toggle_twopage () =
+  opt.twopage <- not opt.twopage;
+  (* increase cache size if twopage *)
+  cache_past := if opt.twopage then 2 else 1;
+  cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
+  let cur_min = List.fold_left min max_int !image_idxes in
+  new_pos (group_pages ~seed:cur_min ~forward:true)
+
 let toggle_fullscreen () =
   if opt.fullscreen then (
     opt.fullscreen <- false;
@@ -462,15 +479,6 @@ let toggle_fullscreen () =
     footer#misc#hide ();
     window#fullscreen ();
    );
-  show_spread ()
-
-let toggle_twopage () =
-  opt.twopage <- not opt.twopage;
-  (* increase cache size if twopage *)
-  cache_past := if opt.twopage then 2 else 1;
-  cache_future := if opt.twopage then 3 else 1;  (* include second page of currint in future *)
-  recenter_cache !image_idxes;
-  preload_cache ();
   show_spread ()
 
 let toggle_manga () =
