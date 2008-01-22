@@ -146,6 +146,8 @@ List.iter (Printf.eprintf "%s\n") contents;*)
 let current_book () = Stack.top books.next
 let max_index () = Array.length (current_book()).files - 1
 
+let within_book_range x = x >= 0 && x <= max_index ()
+
 let book_count () = Stack.length books.next + Stack.length books.prev
 and cur_book_number () = Stack.length books.prev + 1
 
@@ -238,7 +240,7 @@ let prev_book () =
   Stack.push cur books.next; 
   reset_cache_all ()
 
-let scale (wi,hi) ar =
+let scale_wh (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
   and h1 = int_of_float (float_of_int hi *. ar) in
   (w1,h1)
@@ -284,29 +286,6 @@ let preload_pic idx =
 let preload_cache () = for i = image_cache.pos to cache_last_idx () do preload_pic i done
 
 
-module Spread = sig 
-  type t = { idxes: int list;
-	     bits : int; (* bits per pixel*)
-	     alpha : bool; (* true when alpha channel needed *)
-	     mutable pixbuf: GdkPixbuf.pixbuf; 
-	     mutable t_size: (int * int);
-	     mutable on_update : (spread -> unit) option;
-	     mutable scaler : Glib.Idle.id option;
-	   }
- let equal a b = a.idxes = b.idxes && a.t_size = b.t_size
- let hash a = Hashtbl.hash (a.idxes,a.t_size) 
-end
-
-module SpreadCache = Weak.Make(Spread)
-
-let sc = SpreadCache.create 3 
-
-let null_spread = { idxes = []; pixbuf = GdkPixbuf.create 1 1 (); t_size = (1,1); on_update = None; bits=8; alpha=false ; scaler=None}
-
-let last_spread = ref null_spread
-let next_spread = ref null_spread
-let cur_spread = ref null_spread
-
 let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
 let has_size size pb = not (size_diff (pixbuf_size pb) size)
 
@@ -318,92 +297,126 @@ let scale_factor (wt,ht) (wi, hi) =
 
 let string_of_int_list prefix list = List.fold_left (fun acc i -> acc ^ "," ^ (string_of_int i)) prefix list
 	    
-let scale_pic_idle spread () = 
-  let width,height = spread.t_size in
-  if not (has_size (width,height) spread.pixbuf) then begin
-    set_status (Printf.sprintf "Resizing img (%s) to %dx%d" (string_of_int_list "" spread.idxes) width height);
-    let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:spread.alpha () in
-    GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
-    spread.pixbuf <- scaled;
-    (match spread.on_update with None -> () | Some f -> f spread);
-  end; spread.scaler <- None; false
-
-let set_t_size size = 
-  let mod_spread spread = 
-    spread.t_size <- size;
+module Spread = struct 
+  type t = { idxes: int list;
+	     bits : int; (* bits per pixel*)
+	     alpha : bool; (* true when alpha channel needed *)
+	     display : (GdkPixbuf.pixbuf -> unit);
+	     mutable pixbuf: GdkPixbuf.pixbuf; 
+	     mutable t_size: (int * int);
+	     mutable scaler : Glib.Idle.id option;
+	   }
+  let equal a b = a.idxes = b.idxes
+  let hash a = Hashtbl.hash a.idxes
+    
+  let null = { idxes = []; pixbuf = GdkPixbuf.create 1 1 (); t_size = (1,1); display = (fun p -> ()); bits=8; alpha=false ; scaler=None}
+    
+  let scale_idle spread () = 
+    let width,height = spread.t_size in
+    if not (has_size (width,height) spread.pixbuf) then begin
+      set_status (Printf.sprintf "Resizing img (%s) to %dx%d" (string_of_int_list "" spread.idxes) width height);
+      let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:spread.alpha () in
+      GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
+      spread.pixbuf <- scaled;
+    end; 
+    spread.display spread.pixbuf; 
+    spread.scaler <- None; 
+    false
+      
+  let scale ?size spread =
+    (match size with None -> () | Some size -> spread.t_size <- size);
     if spread.scaler = None then 
-      spread.scaler <- Some (Idle.add ~prio:scale_prio (scale_pic_idle spread))
-  in
-  mod_spread !cur_spread; mod_spread !next_spread; mod_spread !last_spread
+      spread.scaler <- 
+	Some (Idle.add ~prio:scale_prio (scale_idle spread))
 
-let make_spread ~target idxes = 
-  assert (idxes <> []);
-set_status (string_of_int_list "Making spread for pages" idxes);
-  let pics = idxes |> List.map get_cache in
+  let quick_view s = 
+    if size_diff s.t_size (pixbuf_size s.pixbuf) then
+      let (width, height) = s.t_size in
+      let out_b = GdkPixbuf.create ~width ~height ~bits:s.bits ~has_alpha:s.alpha () in
+      GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST s.pixbuf;
+      out_b
+    else 
+      s.pixbuf
 
-  (* generate the pixbif *)
-  let out_w, out_h  = pics |> List.map pixbuf_size |> List.fold_left (fun (wa,ha) (wp,hp) -> (wa+wp,max ha hp)) (0,0) in
-  let out_bits = pics |> List.map GdkPixbuf.get_bits_per_sample |> 
-	  List.fold_left max 0 
-  and out_alpha = pics |> List.map GdkPixbuf.get_has_alpha |> 
-	  List.fold_left (||) false in
-  let out_b = GdkPixbuf.create ~width:out_w ~height:out_h 
-    ~bits:out_bits ~has_alpha:out_alpha () in
-  let rec copier dest_x = function [] -> () | pb::rest ->
-    let (w, h) = pixbuf_size pb in
-    let dest_y = (out_h - h) / 2 in
-    GdkPixbuf.copy_area ~dest:out_b ~dest_x ~dest_y ~width:w ~height:h pb;
-    copier (dest_x + w) rest
-  in
-  copier 0 pics;
-  
-set_status (Printf.sprintf "Made spread (%d,%d), %d bits, alpha %b" out_w out_h out_bits out_alpha);
-  (* make the t_size *)
-  let ar = match opt.scale with
-    | Fit -> min 1.0 (scale_factor target (out_w, out_h))
-    | Fixed_AR ar -> ar
-  in
-  let t_size = scale (out_w, out_h) ar in
+  let show s = 
+    s.display (quick_view s)
 
-  { idxes = idxes; pixbuf = out_b; 
-    t_size = t_size;  on_update = None; scaler = None;
-    bits = out_bits; alpha = out_alpha }
+  let make ~target ~display idxes = 
+    assert (idxes <> []);
+    set_status (string_of_int_list "Making spread for pages" idxes);
+    let pics = idxes |> List.map get_cache in
+    
+    (* generate the pixbif *)
+    let out_w, out_h  = pics |> List.map pixbuf_size |> List.fold_left (fun (wa,ha) (wp,hp) -> (wa+wp,max ha hp)) (0,0) in
+    let out_bits = pics |> List.map GdkPixbuf.get_bits_per_sample |> 
+	List.fold_left max 0 
+    and out_alpha = pics |> List.map GdkPixbuf.get_has_alpha |> 
+	List.fold_left (||) false in
+    let out_b = GdkPixbuf.create ~width:out_w ~height:out_h 
+      ~bits:out_bits ~has_alpha:out_alpha () in
+    let rec copier dest_x = function [] -> () | pb::rest ->
+      let (w, h) = pixbuf_size pb in
+      let dest_y = (out_h - h) / 2 in
+      GdkPixbuf.copy_area ~dest:out_b ~dest_x ~dest_y ~width:w ~height:h pb;
+      copier (dest_x + w) rest
+    in
+    copier 0 pics;
+    
+    set_status (Printf.sprintf "Made spread (%d,%d), %d bits, alpha %b" out_w out_h out_bits out_alpha);
+    (* make the t_size *)
+    let ar = match opt.scale with
+      | Fit -> min 1.0 (scale_factor target (out_w, out_h))
+      | Fixed_AR ar -> ar
+    in
+    let t_size = scale_wh (out_w, out_h) ar in
+    
+    let s = { idxes = idxes; pixbuf = out_b; 
+	      t_size = t_size; display = display idxes; scaler = None;
+	      bits = out_bits; alpha = out_alpha } in
+    s.scaler <- Some (Idle.add ~prio:scale_prio (scale_idle s));
+    show s;
+    s
 
-let quick_view spread = 
-  if size_diff spread.t_size (pixbuf_size spread.pixbuf) then
-    let (width, height) = spread.t_size in
-    let out_b = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:spread.alpha () in
-    GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST spread.pixbuf;
-    out_b
-  else 
-    spread.pixbuf
+end
 
+module SpreadCache = Weak.Make(Spread)
 
-(* generate simple preview *)
-let display idxes = 
-
-  (* sets t_size used in quick_view *)
-  let spread = make_spread ~target:(view_size ()) idxes in
-
-  ignore (Idle.add ~prio:scale_prio (scale_pic_idle spread));
-
-  image1#set_pixbuf (quick_view spread);
-
-  cur_spread := spread;
-
-  spread.on_update <- Some (fun s -> image1#set_pixbuf s.pixbuf);
-  (* draw the screen *)
-  ignore (Glib.Main.iteration true)
-
-let show_task = ref None
+let sc = SpreadCache.create 3 
 
 let image_idxes = ref [0]
 
+let get_scache idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes}
+
+let get_scache_current () = get_scache !image_idxes
+
+let set_t_size size = 
+  Spread.scale ~size (get_scache_current ());
+  SpreadCache.iter (Spread.scale ~size) sc
+  
+(* generate simple preview *)
+let display idxes = 
+
+  try 
+    Spread.show (get_scache idxes);
+    ignore (Glib.Main.iteration true)
+  with
+      Not_found -> 
+	let spread = Spread.make ~target:(view_size ()) 
+	  ~display:(fun i p -> if i = !image_idxes then image1#set_pixbuf p) 
+	  idxes in
+	SpreadCache.add sc spread;
+	ignore (Glib.Main.iteration true)
+
+  (* draw the screen *)
+
+
+let show_task = ref None
+
 let show_spread' () =
   file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page (List.hd !image_idxes))) with Glib.Convert.Error (_,s) -> s);
-  let idxes = if opt.manga then !image_idxes else List.rev !image_idxes in (* list built in reverse *)
-  List.filter (fun i -> i < max_index()) idxes |>
-      display;
+  !image_idxes |>
+      List.filter (fun i -> i < max_index()) |>
+	  display;
   show_task := None;
   false
     
@@ -415,8 +428,9 @@ let show_spread () =
     | Some _ -> ()
 
 let new_pos idxes = 
-  image_idxes := idxes;
-  recenter_cache idxes;
+  (* idxes already in reverse order *)
+  image_idxes := idxes |> (if opt.manga then (fun x -> x) else List.rev) |> List.filter within_book_range;
+  recenter_cache !image_idxes;
   preload_cache ();
   show_spread ()
 
@@ -483,8 +497,8 @@ let toggle_fullscreen () =
 
 let toggle_manga () =
   opt.manga <- not opt.manga;
+  image_idxes := List.rev !image_idxes;
   show_spread()
-(*  spread#reorder_child image2#coerce (if opt.manga then 0 else 1)*)
 
 let go_to_page_dialog () =
   let _ = GWindow.dialog ~parent:window ~title:"Go to page"  () in
@@ -494,6 +508,7 @@ let zoom ar_val ar_func =
   opt.scale <-( match opt.scale with
 		    Fit -> Fixed_AR ar_val 
 		  | Fixed_AR ar -> ar_func ar)
+    
 (*;
   if can_twopage !image_idx then 
     scale2_for_view (view_size()) (get_cache !image_idx) (get_cache (!image_idx+1))
