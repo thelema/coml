@@ -325,6 +325,7 @@ module Spread = struct
   let blit_pics pics s = 
     s.pixbuf <- GdkPixbuf.create ~width:s.o_width ~height:s.o_height 
       ~bits:s.bits ~has_alpha:true ();
+    GdkPixbuf.fill s.pixbuf (0x00000000l);
     s.gen <- 1;
     let rec copier dest_x = function [] -> () | pb::rest ->
       let (w, h) = pixbuf_size pb in
@@ -409,7 +410,7 @@ let new_pos idxes =
   show_spread ()
 
 let is_vert idx = 
-  let (w0,h0) = pixbuf_size (get_cache' idx) in
+  let (w0,h0) = pixbuf_size (get_cache idx) in
   w0 < h0
 
 let group_pages ~seed ~forward =
