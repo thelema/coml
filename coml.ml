@@ -29,7 +29,7 @@ type options = { mutable wrap: bool;
 	       }
 (* TODO: save and load options *)
 let opt = { wrap = false; fullscreen = false; 
-	    twopage = false; manga = true;
+	    twopage = true; manga = true;
 	    remove_failed = true; scale = Fit;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
@@ -151,7 +151,7 @@ let within_book_range x = x >= 0 && x <= max_index ()
 let book_count () = Stack.length books.next + Stack.length books.prev
 and cur_book_number () = Stack.length books.prev + 1
 
-let get_page idx = (current_book ()).files.(idx)
+let get_page idx = try (current_book ()).files.(idx) with Invalid_argument _ -> "OOB"
 
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
@@ -240,6 +240,18 @@ let prev_book () =
   Stack.push cur books.next; 
   reset_cache_all ()
 
+let drop_book () =
+  let _ = Stack.pop books.next in
+  if Stack.is_empty books.next then
+    if Stack.is_empty books.prev then begin
+      Printf.printf "All Files Invalid\n";
+      Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
+      Main.quit ()
+    end else 
+      prev_book () (* no more books forward - go back a book *)
+  else 
+    reset_cache_all () (* there is a book to use *)
+
 let scale_wh (wi,hi) ar =
   let w1 = int_of_float (float_of_int wi *. ar) 
   and h1 = int_of_float (float_of_int hi *. ar) in
@@ -248,6 +260,9 @@ let scale_wh (wi,hi) ar =
 let remove_file idx = 
   let cb = current_book () in
   let next i = if i < idx then cb.files.(i) else cb.files.(i+1) in
+  if max_index () = 0 then 
+    drop_book ()
+  else 
     cb.files <- Array.init (max_index ()) next
 
 let rec load_cache idx = 
@@ -256,11 +271,11 @@ let rec load_cache idx =
     set_status (Printf.sprintf "Loading img %d from %s" idx page_file);
     let pic = GdkPixbuf.from_file page_file in
     set_cache idx (Entry pic)
-  with GdkPixbuf.GdkPixbufError(_,msg) ->
+  with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg ->
     (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
 	  ~buttons:GWindow.Buttons.close ~show:true () in
 	  ignore(d#run ()); *)
-    set_status (Printf.sprintf "Failed to load %s" page_file);
+    set_status (Printf.sprintf "Failed to load %s: %s" page_file msg);
     if opt.remove_failed then
       ( remove_file idx; load_cache idx )
     else
@@ -295,7 +310,7 @@ let scale_factor (wt,ht) (wi, hi) =
   let ar_t = wt /. ht and ar_i = wi /. hi in
   if ar_t > ar_i then ht /. hi else wt /. wi
 
-let string_of_int_list prefix = function [] -> prefix ^ "EMPTY" | [i] -> prefix ^ (string_of_int i) | [i1;i2] -> prefix ^ (string_of_int i1) ^ "," ^ (string_of_int i2) | l -> List.fold_left (fun acc i -> acc ^ "," ^ (string_of_int i)) prefix l
+let string_of_int_list prefix list = prefix ^ (list |> List.map string_of_int |> String.concat ",")
 	    
 module Spread = struct 
   type t = { idxes: int list;
@@ -318,13 +333,20 @@ module Spread = struct
       let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:spread.alpha () in
       GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
       spread.pixbuf <- scaled;
+      spread.display spread.pixbuf; 
     end; 
-    spread.display spread.pixbuf; 
     spread.scaler <- None; 
     false
       
+  let t_sizer v_size (s_w,s_h) = 
+    let ar = match opt.scale with
+      | Fit -> min 1.0 (scale_factor v_size (s_w, s_h))
+      | Fixed_AR ar -> ar
+    in
+    scale_wh (s_w, s_h) ar
+
   let scale ?size spread =
-    (match size with None -> () | Some size -> spread.t_size <- size);
+    (match size with None -> () | Some size -> spread.t_size <- t_sizer size (pixbuf_size spread.pixbuf));
     if spread.scaler = None then 
       spread.scaler <- 
 	Some (Idle.add ~prio:scale_prio (scale_idle spread))
@@ -340,6 +362,8 @@ module Spread = struct
 
   let show s = 
     s.display (quick_view s)
+
+(*  let regen spread = make ~target:spread.t_size ~display:spread.display spread.idxes *)
 
   let make ~target ~display idxes = 
     assert (idxes <> []);
@@ -363,26 +387,20 @@ module Spread = struct
     
     set_status (Printf.sprintf "Made spread for pages [%s] (%d,%d), %d bits, alpha %b" (string_of_int_list "" idxes) out_w out_h out_bits out_alpha);
     (* make the t_size *)
-    let ar = match opt.scale with
-      | Fit -> min 1.0 (scale_factor target (out_w, out_h))
-      | Fixed_AR ar -> ar
-    in
-    let t_size = scale_wh (out_w, out_h) ar in
+    let t_size = t_sizer target (out_w, out_h) in
     
     let s = { idxes = idxes; pixbuf = out_b; 
 	      t_size = t_size; display = display; scaler = None;
 	      bits = out_bits; alpha = out_alpha } in
     s.scaler <- Some (Idle.add ~prio:scale_prio (scale_idle s));
-    show s;
     s
-
 end
 
 module SpreadCache = Weak.Make(Spread)
 
 let sc = SpreadCache.create 3 
 
-let image_idxes = ref [0]
+let image_idxes = ref (if opt.manga then [1;0] else [0;1])
 
 let get_scache idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes}
 
@@ -396,9 +414,13 @@ let show_task = ref None
 
 let show_spread' () =
   let idxes = !image_idxes in
+
   let spread = 
     try 
-      let s = get_scache idxes in Printf.eprintf "CACHE HIT\n"; s
+      let s = get_scache idxes in 
+      Printf.eprintf "CACHE HIT\n"; 
+      set_t_size (view_size());
+      s
     with
 	Not_found -> 
 	  let display p = if idxes = !image_idxes then image1#set_pixbuf p in
@@ -414,15 +436,14 @@ let show_spread' () =
     
 let show_spread () = 
   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (string_of_int_list "" !image_idxes) (max_index()) (cur_book_number ()) (book_count()) (current_book()).title);
-  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page (List.hd !image_idxes))) with Glib.Convert.Error (_,s) -> s);
+  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (!image_idxes |> List.map get_page |> String.concat " ")) with Glib.Convert.Error (_,s) -> s);
   match !show_task with
       None -> 
 	show_task := Some (Idle.add ~prio:show_prio show_spread')
     | Some _ -> ()
 
 let new_pos idxes = 
-  (* idxes already in reverse order *)
-  image_idxes := idxes |> (if opt.manga then (fun x -> x) else List.rev) |> List.filter within_book_range;
+  image_idxes := idxes |> (if opt.manga then List.rev else (fun x -> x)) |> List.filter within_book_range;
   recenter_cache !image_idxes;
   preload_cache ();
   show_spread ()
@@ -431,13 +452,13 @@ let is_vert idx =
   let (w0,h0) = pixbuf_size (get_cache' idx) in
   w0 < h0
 
-let group_pages ~seed:idx ~forward =
-  if not opt.twopage then [idx]
+let group_pages ~seed ~forward =
+  if not opt.twopage then [seed]
   else 
-    let p1,p2 = if forward then idx, idx+1 else idx-1,idx in
+    let p1,p2 = if forward then seed, seed+1 else seed-1,seed in
     try 
       if is_vert p1 && is_vert p2 then [p1;p2]
-      else [p1]
+      else [seed]
     with Not_found -> [p1;p2]
 
 let first_image () = set_status "At beginning of book"; new_pos (group_pages ~seed:0 ~forward:true)
@@ -456,15 +477,21 @@ let past_start () =
     then ( first_image (); set_status "At start of Library" )
     else ( prev_book (); last_image ())
 
+let prev_seed idxes =   
+  let cur_min = List.fold_left min max_int idxes in
+  cur_min - 1
+
+let next_seed idxes = 
+  let cur_max = List.fold_left max min_int idxes in
+  cur_max + 1
+
 let prev_image () =
-  let cur_min = List.fold_left min max_int !image_idxes in
-  let seed_page = cur_min - 1 in
+  let seed_page = prev_seed !image_idxes in
   if seed_page < 0 then past_start ()
   else new_pos (group_pages ~seed:seed_page ~forward:false)
     
 let next_image () =
-  let cur_max = List.fold_left max min_int !image_idxes in
-  let seed_page = cur_max + 1 in
+  let seed_page = next_seed !image_idxes in
   if seed_page > max_index () then past_end ()
   else new_pos (group_pages ~seed:seed_page ~forward:true)
     
@@ -564,6 +591,7 @@ let main () =
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
 (*  ignore (pane#event#connect#configure ~callback:resized);*)
+  
   show_spread ();
   window#show ();
   preload_cache ();
