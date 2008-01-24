@@ -177,8 +177,6 @@ let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 
 let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
 
-let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
-
 let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
 
 let failed_load = GdkPixbuf.create 1 1 ()
@@ -374,25 +372,32 @@ module SpreadCache = Weak.Make(Spread)
 
 let sc = SpreadCache.create 3 
 
-let image_idxes = ref []
-
 let get_scache ?(book=current_book()) idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes; book = book}
 
-let make_spread display idxes = 
+let put_scache spread = SpreadCache.add sc spread
+
+let image_idxes = ref []
+
+let display image idxes p = if idxes = !image_idxes then image#set_pixbuf p
+
+let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
+
+let make_spread idxes = 
   try get_scache idxes
   with Not_found -> 
-    let s = Spread.make ~target:(view_size()) ~display idxes in
-    SpreadCache.add sc s;
+    let s = Spread.make ~target:(view_size()) 
+      ~display:(display image1 idxes) idxes in
+    put_scache s;
     s
+
+let scale_to_view spread = Spread.scale (view_size ()) spread
 
 let show_spread () = 
   let show_task = ref None in
   let show_cur_spread' () =
-    let idxes = !image_idxes in
-    let display p = if idxes = !image_idxes then image1#set_pixbuf p in
-    let spread = make_spread display idxes in
+    let spread = make_spread !image_idxes in
     Spread.scale (view_size()) spread; (* queues a scaling job *)
-    Spread.show spread;
+    Spread.show spread; (* spread shows itself using display defined above *)
     
     (* draw the screen *)
     ignore (Glib.Main.iteration true);
@@ -495,11 +500,6 @@ let zoom ar_val ar_func =
 		  | Fixed_AR ar -> ar_func ar);
   SpreadCache.clear sc;
   show_spread()
-(*;
-  if can_twopage !image_idx then 
-    scale2_for_view (view_size()) (get_cache !image_idx) (get_cache (!image_idx+1))
-  else 
-    scale_for_view (view_size()) (get_cache !image_idx)*)
 
 let zoom_out () = zoom 0.95 (fun ar -> Fixed_AR (ar *. 0.95))
 and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Fixed_AR (ar /. 0.95))
