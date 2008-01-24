@@ -159,6 +159,9 @@ and cur_book_number () = Stack.length books.prev + 1
 let get_page ?(book=current_book()) idx = 
   try book.files.(idx) with Invalid_argument _ -> "OOB"
 
+
+(* GTK WIDGETS *)
+
 let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
 let scroller = GBin.scrolled_window ~packing:pane#add1 ~width:9999 ~height:9999 ()
@@ -179,7 +182,6 @@ let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocati
 let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
 
 let failed_load = GdkPixbuf.create 1 1 ()
-let image_idxes = ref (if opt.manga then [1;0] else [0;1])
 
 let get_cache' ?(book=current_book()) idx =
   try 
@@ -272,33 +274,19 @@ let scale_factor (wt,ht) (wi, hi) =
 let string_of_int_list prefix list = prefix ^ (list |> List.map string_of_int |> String.concat ",")
 	    
 module Spread = struct 
-  type t = { idxes: int list;
+  type t = { idxes: int list; book: book; 
 	     bits : int; (* bits per pixel*)
 	     o_width : int; o_height: int;
 	     display : (GdkPixbuf.pixbuf -> unit);
 	     mutable pixbuf: GdkPixbuf.pixbuf; 
 	     mutable t_size: int * int;
 	     mutable scaler : Glib.Idle.id option;
-	     mutable gen : int; (* how many generations of scaling *)
 	   }
-  let equal a b = a.idxes = b.idxes
-  let hash a = Hashtbl.hash a.idxes
+  let equal a b = a.idxes = b.idxes && a.book == b.book
+  let hash a = Hashtbl.hash (a.idxes,a.book)
     
-  let null = { idxes = []; pixbuf = failed_load; t_size = (1,1); display = (fun p -> ()); bits=8; scaler=None; gen=0; o_width = 1; o_height = 1}
+  let null = { idxes = []; book=Obj.magic 0;pixbuf = failed_load; t_size = (1,1); display = (fun p -> ()); bits=8; scaler=None; o_width = 1; o_height = 1}
     
-  let scale_idle spread () = 
-    let width,height = spread.t_size in
-    if not (has_size (width,height) spread.pixbuf) then begin
-(*      set_status (Printf.sprintf "Resizing img (%s) to %dx%d" (string_of_int_list "" spread.idxes) width height);*)
-      let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:true () in
-      GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
-      spread.pixbuf <- scaled;
-      spread.gen <- spread.gen + 1;
-      spread.display spread.pixbuf; 
-    end; 
-    spread.scaler <- None; 
-    false
-      
   let t_sizer v_size (s_w,s_h) = 
     let ar = match opt.scale with
       | Fit -> min 1.0 (scale_factor v_size (s_w, s_h))
@@ -326,7 +314,6 @@ module Spread = struct
     s.pixbuf <- GdkPixbuf.create ~width:s.o_width ~height:s.o_height 
       ~bits:s.bits ~has_alpha:true ();
     GdkPixbuf.fill s.pixbuf (0x00000000l);
-    s.gen <- 1;
     let rec copier dest_x = function [] -> () | pb::rest ->
       let (w, h) = pixbuf_size pb in
       let dest_y = (s.o_height - h) / 2 in
@@ -335,20 +322,36 @@ module Spread = struct
     in
     copier 0 pics
 
-  let make ~target ~display idxes = 
-    assert (idxes <> []);
+  let scale_idle spread () = 
+    let width,height = spread.t_size in
+    if not (has_size (width,height) spread.pixbuf) then begin
+      set_status (Printf.sprintf "Resizing img (%s) to %dx%d" (string_of_int_list "" spread.idxes) width height);
+      blit_pics (pics_of_idxes spread.idxes) spread;
+      let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:true () in
+      GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
+      spread.pixbuf <- scaled;
+      spread.display spread.pixbuf; 
+    end; (*else 
+       Printf.eprintf "Not scaling (%s) to %dx%d" (string_of_int_list "" spread.idxes) width height;*)
+    spread.scaler <- None; 
+    false
+      
+  let make ?target ~display ?(book=current_book()) idxes = 
+    if idxes = [] then null else
     let pics = pics_of_idxes idxes in
     
     (* generate the pixbif *)
     let out_w, out_h  = pics |> List.map pixbuf_size |> List.fold_left (fun (wa,ha) (wp,hp) -> (wa+wp,max ha hp)) (0,0) in
     let out_bits = pics |> List.map GdkPixbuf.get_bits_per_sample |> 
-	List.fold_left max 0 
-    and t_size = t_sizer target (out_w, out_h) in
+	List.fold_left max 0
+    and t_size = 
+      match target with None -> (out_w,out_h) (* target = original size *)
+	| Some t -> t_sizer t (out_w, out_h) in (* calculate correct target *)
     
-    let s = { idxes = idxes; display = display; 
+    let s = { idxes = idxes; book = book;
 	      o_width = out_w; o_height = out_h;
-	      bits = out_bits; 
-	      pixbuf = failed_load; gen = 0;
+	      bits = out_bits; display = display; 
+	      pixbuf = failed_load;
 	      t_size = t_size; scaler = None; } in
     s.scaler <- Some (Idle.add ~prio:scale_prio (scale_idle s));
 
@@ -358,41 +361,38 @@ module Spread = struct
     s
 
   let scale size spread =
-    let (w,h) = pixbuf_size spread.pixbuf in
-    let (w1,h1) = t_sizer size (w,h) in
-    if w < w1 || h < h1 || spread.gen > 2 then
-      blit_pics (pics_of_idxes spread.idxes) spread;
-    spread.t_size <- t_sizer size (w,h);
-    if spread.scaler = None then 
+    spread.t_size <- t_sizer size (spread.o_width,spread.o_height);
+    if spread.scaler = None then begin
       spread.scaler <- 
-	Some (Idle.add ~prio:scale_prio (scale_idle spread))
+	Some (Idle.add ~prio:scale_prio (scale_idle spread));
+      Printf.eprintf "Queueing scaling on (%s)\n" (string_of_int_list "" spread.idxes);
+      end
+	
 end
 
 module SpreadCache = Weak.Make(Spread)
 
 let sc = SpreadCache.create 3 
 
-let get_scache idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes}
+let image_idxes = ref []
 
-let get_scache_current () = get_scache !image_idxes
+let get_scache ?(book=current_book()) idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes; book = book}
+
+let make_spread idxes = 
+  try get_scache idxes
+  with Not_found -> 
+    let display p = if idxes = !image_idxes then image1#set_pixbuf p in
+    let s = Spread.make ~target:(view_size()) ~display idxes in
+    SpreadCache.add sc s;
+    s
 
 let show_spread () = 
   let show_task = ref None in
   let show_cur_spread' () =
     let idxes = !image_idxes in
-    let spread = 
-      try 
-	let s = get_scache idxes in 
-(*	Printf.eprintf "CACHE HIT\n"; *)
-	Spread.scale (view_size()) s;
-	s
-      with
-	  Not_found -> 
-	    let display p = if idxes = !image_idxes then image1#set_pixbuf p in
-	    Spread.make ~target:(view_size ()) ~display idxes
-    in
+    let spread = make_spread idxes in
+    Spread.scale (view_size()) spread; (* queues a scaling job *)
     Spread.show spread;
-    ignore (SpreadCache.merge sc spread);
     
     (* draw the screen *)
     ignore (Glib.Main.iteration true);
@@ -405,10 +405,6 @@ let show_spread () =
   if !show_task = None then 
     show_task := Some (Idle.add ~prio:show_prio show_cur_spread')
     
-let new_pos idxes = 
-  image_idxes := idxes |> (if opt.manga then List.rev else (fun x -> x)) |> List.filter within_book_range;
-  show_spread ()
-
 let is_vert idx = 
   let (w0,h0) = pixbuf_size (get_cache idx) in
   w0 < h0
@@ -421,6 +417,25 @@ let group_pages ~seed ~forward =
       if is_vert p1 && is_vert p2 then [p1;p2]
       else [seed]
     with Not_found -> [p1;p2]
+
+let group_pages ~seed ~forward = group_pages ~seed ~forward |> (if opt.manga then List.rev else (fun x -> x)) |> List.filter within_book_range
+
+let prev_pages idxes =   
+  let cur_min = List.fold_left min max_int idxes in
+  if cur_min <= 0 || cur_min = max_int then [] 
+  else group_pages ~seed:(cur_min - 1) ~forward:false |> List.filter within_book_range
+
+let next_pages idxes = 
+  let cur_max = List.fold_left max min_int idxes in
+  if cur_max >= max_index() || cur_max = min_int then []
+  else group_pages ~seed:(cur_max + 1) ~forward:true |> List.filter within_book_range
+
+let new_pos idxes = 
+  image_idxes := idxes;
+  show_spread ();
+  ignore(Idle.add ~prio:preload_prio (fun () -> make_spread (prev_pages idxes); false));
+  ignore(Idle.add ~prio:preload_prio (fun () -> make_spread (next_pages idxes); false))
+
 
 let first_image () = set_status "At beginning of book"; new_pos (group_pages ~seed:0 ~forward:true)
 
@@ -437,16 +452,6 @@ let past_start () =
     if Stack.length books.prev < 1 
     then ( first_image (); set_status "At start of Library" )
     else ( prev_book (); last_image ())
-
-let prev_pages idxes =   
-  let cur_min = List.fold_left min max_int idxes in
-  if cur_min <= 0 then [] 
-  else group_pages ~seed:(cur_min - 1) ~forward:false |> List.filter within_book_range
-
-let next_pages idxes = 
-  let cur_max = List.fold_left max min_int idxes in
-  if cur_max >= max_index() then []
-  else group_pages ~seed:(cur_max + 1) ~forward:true |> List.filter within_book_range
 
 let prev_image () =
   let new_i = prev_pages !image_idxes in
@@ -488,8 +493,9 @@ let go_to_page_dialog () =
 let zoom ar_val ar_func = 
   opt.scale <-( match opt.scale with
 		    Fit -> Fixed_AR ar_val 
-		  | Fixed_AR ar -> ar_func ar)
-    
+		  | Fixed_AR ar -> ar_func ar);
+  SpreadCache.clear sc;
+  show_spread()
 (*;
   if can_twopage !image_idx then 
     scale2_for_view (view_size()) (get_cache !image_idx) (get_cache (!image_idx+1))
@@ -551,9 +557,8 @@ let main () =
   ignore (window#connect#destroy ~callback:Main.quit);
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
-(*  ignore (pane#event#connect#configure ~callback:resized);*)
   
-  show_spread ();
+  new_pos(group_pages ~seed:0 ~forward:true);
   window#show ();
 (*  prescale_cache ();*)
   Main.main () (* calls the GTK main event loop *)
