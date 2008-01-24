@@ -378,10 +378,9 @@ let image_idxes = ref []
 
 let get_scache ?(book=current_book()) idxes = SpreadCache.find sc {Spread.null with Spread.idxes=idxes; book = book}
 
-let make_spread idxes = 
+let make_spread display idxes = 
   try get_scache idxes
   with Not_found -> 
-    let display p = if idxes = !image_idxes then image1#set_pixbuf p in
     let s = Spread.make ~target:(view_size()) ~display idxes in
     SpreadCache.add sc s;
     s
@@ -390,7 +389,8 @@ let show_spread () =
   let show_task = ref None in
   let show_cur_spread' () =
     let idxes = !image_idxes in
-    let spread = make_spread idxes in
+    let display p = if idxes = !image_idxes then image1#set_pixbuf p in
+    let spread = make_spread display idxes in
     Spread.scale (view_size()) spread; (* queues a scaling job *)
     Spread.show spread;
     
@@ -435,7 +435,6 @@ let new_pos idxes =
   show_spread ();
   ignore(Idle.add ~prio:preload_prio (fun () -> make_spread (prev_pages idxes); false));
   ignore(Idle.add ~prio:preload_prio (fun () -> make_spread (next_pages idxes); false))
-
 
 let first_image () = set_status "At beginning of book"; new_pos (group_pages ~seed:0 ~forward:true)
 
@@ -492,7 +491,7 @@ let go_to_page_dialog () =
 
 let zoom ar_val ar_func = 
   opt.scale <-( match opt.scale with
-		    Fit -> Fixed_AR ar_val 
+		    Fit -> Fixed_AR ar_val
 		  | Fixed_AR ar -> ar_func ar);
   SpreadCache.clear sc;
   show_spread()
