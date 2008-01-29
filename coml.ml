@@ -35,7 +35,7 @@ let opt = { wrap = false; fullscreen = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
-let preload_prio = 150 and show_prio = 115 and scale_prio = 200 and prescale_prio = 190
+let preload_prio = 200 and show_prio = 115 and scale_prio = 150
 
 let failed_load = GdkPixbuf.create 1 1 ()
 
@@ -119,7 +119,7 @@ module Spread = struct
     else 
       s.pixbuf <- s.get_pic s.pos
 
-  let scale_idle disp_func spread () = 
+  let scale_idle ~post_scale spread () = 
     if is_vert spread.pixbuf && opt.twopage then begin
       let next_idx = (match spread.dir with `FORWARD -> (+) | `BACKWARD -> (-)) 1 spread.pos in
       let next_pic = spread.get_pic next_idx in
@@ -136,8 +136,8 @@ Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxe
       let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:true () in
       GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
       spread.pixbuf <- scaled;
-      disp_func spread.pos spread.pixbuf;
     end;
+    (match post_scale with None -> () | Some f -> f spread.pos spread.pixbuf);
     spread.scaler <- None; 
     false
       
@@ -152,11 +152,11 @@ Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxe
       t_size = (out_w,out_h); scaler = None; 
       get_pic = get_cache; dir = dir }
 
-  let scale disp_func size spread =
+  let scale ?post_scale size spread =
     spread.t_size <- size;
     if spread.scaler = None then
       spread.scaler <- 
-	Some (Idle.add ~prio:scale_prio (scale_idle disp_func spread));
+	Some (Idle.add ~prio:scale_prio (scale_idle ~post_scale spread));
 	
 end
 
@@ -283,7 +283,6 @@ let within_book_range ?(book=current_book()) x =
   x >= 0 && x <= max_index ()
 
 let book_count () = Array.length !books
-and cur_book_number () = !book_idx + 1
 
 let get_page ?(book=current_book()) idx = 
   try book.files.(idx) with Invalid_argument _ -> "OOB"
@@ -383,8 +382,6 @@ let put_scache ?(book=current_book()) spread = Weak.set book.spreads (Spread.get
 let disp_pos = ref 0
 let move_dir = ref `FORWARD
 
-let display pos pic = if pos = !disp_pos then image1#set_pixbuf pic
-
 let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
 
 let get_spread ?(book=current_book()) pos = 
@@ -392,39 +389,23 @@ let get_spread ?(book=current_book()) pos =
       None -> 
 	let s = Spread.make pos get_cache !move_dir in
 	put_scache ~book s;
+	Printf.eprintf "Cache_miss %d  " pos;
 	s
-    | Some s -> s
-
-let scale_to_view spread = Spread.scale display (view_size ()) spread
+    | Some s -> Printf.eprintf "Cache_hit %d  " pos; s
 
 let idxes_on_disp () = 
   match get_scache !disp_pos with 
-      None -> Printf.eprintf "IOD: n=%d " !disp_pos; [!disp_pos] 
-    | Some s -> Printf.eprintf "IOD: S[%s] " (Spread.get_idxes s |> string_of_int_list ""); Spread.get_idxes s
+      None -> Printf.eprintf "IOD: n=%d  " !disp_pos; [!disp_pos] 
+    | Some s -> Printf.eprintf "IOD: S[%s]  " (Spread.get_idxes s |> string_of_int_list ""); Spread.get_idxes s
 
-let show_spread () = 
-  let show_taskid = ref None in
-  let cur_spread_task () =
-    let spread = get_spread !disp_pos in
-    scale_to_view spread;
-    image1#set_pixbuf (Spread.quick_view spread ());
+let display pos pic = 
+  if pos = !disp_pos then (
+    image1#set_pixbuf pic;
+    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (idxes_on_disp () |> string_of_int_list "") (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title);
+  )
 
-    (* draw the screen *)
-    ignore (Glib.Main.iteration true);
-    show_taskid := None;
-    false
-  in
-  let book = current_book () in
-  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (idxes_on_disp () |> string_of_int_list "") (max_index ~book ()) (cur_book_number ()) (book_count()) book.title);
-  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !disp_pos)) with Glib.Convert.Error (_,s) -> s);
-  if !show_taskid = None then 
-    show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
-    
-let first_page () = 0
-let last_page () = max_index ()
-
-let prev_page () = 
-  let i = idxes_on_disp () |> List.fold_left min max_int in
+let prev_page idxes = 
+  let i = idxes |> List.fold_left min max_int in
   if opt.twopage then (* try to move back two pages *)
     match get_scache (i-2) with
 	None -> i-1
@@ -432,14 +413,40 @@ let prev_page () =
       | _ -> i-1
   else i-1
 
-let next_page () = idxes_on_disp () |> List.fold_left max min_int|> (+)1
+let next_page idxes = idxes |> List.fold_left max min_int |> (+)1
 
-let preload_spread pos = 
-  set_status (Printf.sprintf "Preloading: %d (iod: %s)" pos (idxes_on_disp () |> string_of_int_list ""));
-  ignore(Idle.add ~prio:preload_prio 
-	   (fun () -> ignore(get_spread pos); false))
+let preload_spread () = 
+  let preload_task () = 
+    let idxes = (Spread.get_idxes (get_spread !disp_pos)) in
+    let next_pos = 
+      (match !move_dir with `FORWARD -> next_page | `BACKWARD -> prev_page) idxes in
+    set_status (Printf.sprintf "Preloading: %d (iod: %s)" next_pos (idxes |> string_of_int_list ""));
+    let next_spread = get_spread next_pos in
+    Spread.scale (view_size ()) next_spread;
+    false
+  in
+  ignore(Idle.add ~prio:preload_prio preload_task)
 
-let preload_next () = preload_spread (match !move_dir with `FORWARD -> next_page () | `BACKWARD -> prev_page ())
+let show_spread () = 
+  let show_taskid = ref None in
+  let cur_spread_task () =
+    let pos = !disp_pos in
+    let spread = get_spread pos in
+    Spread.scale ~post_scale:display (view_size ()) spread;
+    display pos (Spread.quick_view spread ());
+    preload_spread ();
+
+    (* draw the screen *)
+    ignore (Glib.Main.iteration true);
+    show_taskid := None;
+    false
+  in
+  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !disp_pos)) with Glib.Convert.Error (_,s) -> s);
+  if !show_taskid = None then 
+    show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
+    
+let first_page _ = 0
+let last_page _ = max_index ()
 
 let rec new_pos (pos,book_i) =
   let b0 = 0 and bmax = Array.length !books - 1 in
@@ -464,7 +471,7 @@ let rec new_pos (pos,book_i) =
     show_spread ()
   end
 
-let new_page gen_page () = new_pos (gen_page (),!book_idx)
+let new_page gen_page () = new_pos (gen_page (idxes_on_disp ()),!book_idx)
     
 let clear_spread_cache ?(book=current_book())() =
   Weak.fill book.spreads 0 (max_index ~book () + 1) None
@@ -487,7 +494,7 @@ let exit_fullscreen () =
   show_spread ()
 
 let toggle_fullscreen () =
-  if opt.fullscreen then enter_fullscreen () else exit_fullscreen ()
+  if opt.fullscreen then exit_fullscreen () else enter_fullscreen ()
 
 let toggle_manga () =
   opt.manga <- not opt.manga;
