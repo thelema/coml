@@ -18,26 +18,53 @@ let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
    
 open GMain
    
-type scaling = Fit | Fixed_AR of float
+type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
 type options = { mutable wrap: bool; 
 		 mutable fullscreen: bool;
 		 mutable twopage: bool;
 		 mutable manga: bool;
 		 mutable remove_failed: bool; 
-		 mutable scale: scaling;
+		 mutable fit: scaling;
+		 mutable zoom_enlarge: bool;
 		 mutable rar_exe: string;
 	       }
 (* TODO: save and load options *)
 let opt = { wrap = false; fullscreen = false; 
 	    twopage = true; manga = true;
-	    remove_failed = true; scale = Fit;
+	    remove_failed = true; fit = Fit_both; zoom_enlarge = false;
 	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
 let preload_prio = 200 and show_prio = 115 and scale_prio = 150
 
 let failed_load = GdkPixbuf.create 1 1 ()
+
+let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
+
+let fit_wid (wt,_) (wi,_) = float wt /. float wi
+let fit_hei (_, ht) (_, hi) = float ht /. float hi
+let fit_both st si = min (fit_wid st si) (fit_hei st si)
+
+let scale_raw (width,height) ~interp pixbuf =
+  let out_b = GdkPixbuf.create ~width ~height ~has_alpha:true () in
+  GdkPixbuf.scale ~dest:out_b ~width ~height ~interp pixbuf;
+  out_b
+
+let ar_sizer t_size p_size fit =
+  let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom) in
+  let zoom = 
+    match fit with 
+	Fit_w -> fit_wid t_size p_size 
+      | Fit_h -> fit_hei t_size p_size 
+      | Fit_both -> fit_both t_size p_size 
+      | Zoom z -> z in
+  let zoom = if opt.zoom_enlarge then zoom else min zoom 1.0 in
+  mul_size p_size zoom
+
+let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
+  let ar_size = ar_sizer t_size (pixbuf_size pixbuf) fit in
+  scale_raw ar_size ~interp pixbuf
 
 module Spread = struct 
   type t = { pos: int;
@@ -56,36 +83,17 @@ module Spread = struct
   let get_idxes s = s.idxes
   let get_pos s = s.pos
     
-  let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
-  let size_diff (w1,h1) (w2,h2) = abs(w1-w2) > 2 || abs(h1-h2) > 2
-  let has_size size pb = not (size_diff (pixbuf_size pb) size)
+  let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
     
-  let scale_factor (wt,ht) (wi, hi) =
-    let wt = float wt and ht = float ht
-    and wi = float wi and hi = float hi in
-    let ar_t = wt /. ht and ar_i = wi /. hi in
-    if ar_t > ar_i then ht /. hi else wt /. wi
-
-  let scale_wh (wi,hi) ar =
-    let w1 = int_of_float (float_of_int wi *. ar) 
-    and h1 = int_of_float (float_of_int hi *. ar) in
-    (w1,h1)
-
-  let t_sizer v_size (s_w,s_h) = 
-    let ar = match opt.scale with
-      | Fit -> min 1.0 (scale_factor v_size (s_w, s_h))
-      | Fixed_AR ar -> ar
-    in
-    scale_wh (s_w, s_h) ar
+  let fits_t_size s ?(t=s.t_size) () =
+    let ar_size = ar_sizer s.t_size (s.o_width,s.o_height) opt.fit in
+    size_fits (pixbuf_size s.pixbuf) ar_size
 
   let quick_view s ?(size=s.t_size) () = 
-    let width,height = t_sizer s.t_size (s.o_width,s.o_height) in
-    if size_diff (width,height) (pixbuf_size s.pixbuf) then
-      let out_b = GdkPixbuf.create ~width ~height ~bits:s.bits ~has_alpha:true () in
-      GdkPixbuf.scale ~dest:out_b ~width ~height ~interp:`NEAREST s.pixbuf;
-      out_b
-    else 
+    if fits_t_size s ~t:size () then
       s.pixbuf
+    else 
+      scale_ar size s.pixbuf
 
   let pics_of_idxes get_cache idxes = idxes
 	   |> List.map get_cache 
@@ -120,22 +128,19 @@ module Spread = struct
       s.pixbuf <- s.get_pic s.pos
 
   let scale_idle ~post_scale spread () = 
-    if is_vert spread.pixbuf && opt.twopage then begin
+    if is_vert spread.pixbuf && opt.twopage && List.length spread.idxes = 1 then begin
       let next_idx = (match spread.dir with `FORWARD -> (+) | `BACKWARD -> (-)) 1 spread.pos in
       let next_pic = spread.get_pic next_idx in
       if is_vert next_pic then begin
-	Printf.eprintf "Adding %d to spread %d\n" next_idx spread.pos;
+(*	Printf.eprintf "Adding %d to spread %d\n" next_idx spread.pos;*)
 	add_pic spread next_pic next_idx spread.dir
       end;
     end;
     
-    let width,height = t_sizer spread.t_size (spread.o_width,spread.o_height) in
-    if not (has_size (width,height) spread.pixbuf) then begin
-Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height;
+    if not (fits_t_size spread ()) then begin
+(*Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height; *)
       freshen_pixbuf spread;
-      let scaled = GdkPixbuf.create ~width ~height ~bits:spread.bits ~has_alpha:true () in
-      GdkPixbuf.scale ~dest:scaled ~width ~height ~interp:`HYPER spread.pixbuf;
-      spread.pixbuf <- scaled;
+      spread.pixbuf <- scale_ar spread.t_size ~interp:`HYPER spread.pixbuf;
     end;
     (match post_scale with None -> () | Some f -> f spread.pos spread.pixbuf);
     spread.scaler <- None; 
@@ -280,7 +285,8 @@ let max_index ?(book = current_book()) () =
   Array.length book.files - 1
 
 let within_book_range ?(book=current_book()) x = 
-  x >= 0 && x <= max_index ()
+  x >=
+ 0 && x <= max_index ()
 
 let book_count () = Array.length !books
 
@@ -290,20 +296,34 @@ let get_page ?(book=current_book()) idx =
 
 (* GTK WIDGETS *)
 
-let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:900 ~height:700 ()
+let window_width = 900 and window_height = 700
+let sidebar_width = 100
+
+let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:window_width ~height:window_height ()
+
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
-let contents = GPack.hbox ~packing:pane#add1 ~height:660 ()
-let sidebar = GBin.scrolled_window ~packing:contents#pack ~width:100 ()
-let _ = sidebar#set_hpolicy `NEVER ; sidebar#set_vpolicy `AUTOMATIC
-let scroller = GBin.scrolled_window ~packing:contents#add ~width:800 ()
-let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
-let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
-let footer = GPack.hbox ~packing:pane#pack2 ()
-let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
-let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
-let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
+
+ let contents = GPack.hbox ~packing:pane#add1 ~height:660 ()
+
+  let sidescroll = GBin.scrolled_window ~packing:contents#pack ~width:sidebar_width ()
+  let _ = sidescroll#set_hpolicy `NEVER ; sidescroll#set_vpolicy `AUTOMATIC
+   let sb_cols = new GTree.column_list
+   let sb_col_tn: GdkPixbuf.pixbuf GTree.column = sb_cols#add Gobject.Data.gobject
+   let tn_store = GTree.list_store sb_cols
+   let sidebar = GTree.view ~model:tn_store ~packing:sidescroll#add ()
+   let sb_view_col = GTree.view_column ~title:"Thumbnails" ~renderer:(GTree.cell_renderer_pixbuf [],[("pixbuf",sb_col_tn)]) ()
+   let _ = sidebar#append_column sb_view_col
+
+  let scroller = GBin.scrolled_window ~packing:contents#add ~width:(window_width - sidebar_width) ()
+  let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
+   let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
+
+ let footer = GPack.hbox ~packing:pane#pack2 ()
+  let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
+  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+  let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
+  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+  let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
 let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
@@ -316,7 +336,10 @@ let get_cache' ?(book=current_book()) idx =
   with Invalid_argument _ -> failed_load
 
 let set_cache ?(book=current_book()) idx v = 
-  Weak.set book.cache idx (Some v)
+  Weak.set book.cache idx (Some v); 
+  let width = sidebar_width - 25 and height = 100 in
+  let scaled_pic = scale_ar (width,height) ~interp:`HYPER ~fit:Fit_both v in
+  tn_store#set ~row:(tn_store#append ()) ~column:sb_col_tn scaled_pic
 
 let print_cache ?(book=current_book()) () = 
   Printf.eprintf "Cache: {";
@@ -389,14 +412,14 @@ let get_spread ?(book=current_book()) pos =
       None -> 
 	let s = Spread.make pos get_cache !move_dir in
 	put_scache ~book s;
-	Printf.eprintf "Cache_miss %d  " pos;
+	(*Printf.eprintf "Cache_miss %d  " pos;*)
 	s
-    | Some s -> Printf.eprintf "Cache_hit %d  " pos; s
+    | Some s -> (*Printf.eprintf "Cache_hit %d  " pos; *) s
 
 let idxes_on_disp () = 
   match get_scache !disp_pos with 
-      None -> Printf.eprintf "IOD: n=%d  " !disp_pos; [!disp_pos] 
-    | Some s -> Printf.eprintf "IOD: S[%s]  " (Spread.get_idxes s |> string_of_int_list ""); Spread.get_idxes s
+      None -> (*Printf.eprintf "IOD: n=%d  " !disp_pos;*) [!disp_pos] 
+    | Some s ->(* Printf.eprintf "IOD: S[%s]  " (Spread.get_idxes s |> string_of_int_list "");*) Spread.get_idxes s
 
 let display pos pic = 
   if pos = !disp_pos then (
@@ -415,6 +438,8 @@ let prev_page idxes =
 
 let next_page idxes = idxes |> List.fold_left max min_int |> (+)1
 
+let preload_taskid = ref None
+
 let preload_spread () = 
   let preload_task () = 
     let idxes = (Spread.get_idxes (get_spread !disp_pos)) in
@@ -423,9 +448,11 @@ let preload_spread () =
     set_status (Printf.sprintf "Preloading: %d (iod: %s)" next_pos (idxes |> string_of_int_list ""));
     let next_spread = get_spread next_pos in
     Spread.scale (view_size ()) next_spread;
+    preload_taskid := None;
     false
   in
-  ignore(Idle.add ~prio:preload_prio preload_task)
+  if !preload_taskid = None then
+    preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
 
 let show_spread () = 
   let show_taskid = ref None in
@@ -519,15 +546,15 @@ let go_to_page_dialog () =
     | `OK -> on_ok ()
 
 let zoom ar_val ar_func = 
-  opt.scale <-( match opt.scale with
-		    Fit -> Fixed_AR ar_val
-		  | Fixed_AR ar -> ar_func ar);
+  opt.fit <-( match opt.fit with
+		    Fit_both | Fit_w | Fit_h -> Zoom ar_val
+		  | Zoom ar -> ar_func ar);
   clear_spread_cache ();
   show_spread()
 
-let zoom_out () = zoom 0.95 (fun ar -> Fixed_AR (ar *. 0.95))
-and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Fixed_AR (ar /. 0.95))
-and toggle_zoom () = zoom 1.0 (fun _ -> Fit)
+let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
+and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Zoom (ar /. 0.95))
+and toggle_zoom () = zoom 1.0 (fun _ -> Fit_both)
 
 
 (* key bindings as a list of pairs  (key, function) *)  
@@ -575,7 +602,7 @@ let main () =
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
   build_books arg_list;
   if Array.length !books = 0 || max_index () = 0 then begin
-    Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
+    Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
   end;
 
