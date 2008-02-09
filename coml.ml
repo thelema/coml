@@ -515,13 +515,13 @@ let toggle_twopage () =
 
 let enter_fullscreen () = 
   opt.fullscreen <- true;
-  footer#misc#hide (); sidebar#misc#hide ();
+  footer#misc#hide (); sidescroll#misc#hide ();
   window#fullscreen ();
   show_spread ()
 
 let exit_fullscreen () =
   opt.fullscreen <- false;
-  footer#misc#show (); sidebar#misc#show ();
+  footer#misc#show (); sidescroll#misc#show ();
   window#unfullscreen ();
   show_spread ()
 
