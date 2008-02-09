@@ -402,7 +402,7 @@ let get_scache ?(book=current_book()) pos = try Weak.get book.spreads pos with I
 
 let put_scache ?(book=current_book()) spread = Weak.set book.spreads (Spread.get_pos spread) (Some spread)
 
-let disp_pos = ref 0
+let cur_spread = ref Spread.null
 let move_dir = ref `FORWARD
 
 let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
@@ -416,13 +416,11 @@ let get_spread ?(book=current_book()) pos =
 	s
     | Some s -> (*Printf.eprintf "Cache_hit %d  " pos; *) s
 
-let idxes_on_disp () = 
-  match get_scache !disp_pos with 
-      None -> (*Printf.eprintf "IOD: n=%d  " !disp_pos;*) [!disp_pos] 
-    | Some s ->(* Printf.eprintf "IOD: S[%s]  " (Spread.get_idxes s |> string_of_int_list "");*) Spread.get_idxes s
+let idxes_on_disp () = Spread.get_idxes !cur_spread
 
 let display pos pic = 
-  if pos = !disp_pos then (
+  set_status (Printf.sprintf "Displaying pos %d" pos);
+  if pos = Spread.get_pos !cur_spread then (
     image1#set_pixbuf pic;
     window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (idxes_on_disp () |> string_of_int_list "") (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title);
   )
@@ -442,7 +440,7 @@ let preload_taskid = ref None
 
 let preload_spread () = 
   let preload_task () = 
-    let idxes = (Spread.get_idxes (get_spread !disp_pos)) in
+    let idxes = idxes_on_disp() in
     let next_pos = 
       (match !move_dir with `FORWARD -> next_page | `BACKWARD -> prev_page) idxes in
     set_status (Printf.sprintf "Preloading: %d (iod: %s)" next_pos (idxes |> string_of_int_list ""));
@@ -454,11 +452,13 @@ let preload_spread () =
   if !preload_taskid = None then
     preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
 
-let show_spread () = 
+let show_spread = 
   let show_taskid = ref None in
+  let disp_pos = ref 0 in
   let cur_spread_task () =
     let pos = !disp_pos in
     let spread = get_spread pos in
+    cur_spread := spread;
     Spread.scale ~post_scale:display (view_size ()) spread;
     display pos (Spread.quick_view spread ());
     preload_spread ();
@@ -468,10 +468,13 @@ let show_spread () =
     show_taskid := None;
     false
   in
-  file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !disp_pos)) with Glib.Convert.Error (_,s) -> s);
-  if !show_taskid = None then 
-    show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
-    
+  let ss ?pos () = 
+    (match pos with None -> () | Some (p_idx,b_idx) -> disp_pos := p_idx; book_idx := b_idx);
+    file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !disp_pos)) with Glib.Convert.Error (_,s) -> s);
+    if !show_taskid = None then 
+      show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
+  in ss
+	
 let first_page _ = 0
 let last_page _ = max_index ()
 
@@ -492,13 +495,15 @@ let rec new_pos (pos,book_i) =
     else 
       if pos = max_index () then set_status 
 	(if book_i = bmax then "At end of Library" else "At end of book");
-    move_dir := if pos=0 then `FORWARD else if pos = pmax then `BACKWARD else if pos > !disp_pos then `FORWARD else `BACKWARD;
-    disp_pos := pos;
-    book_idx := book_i;
-    show_spread ()
+    move_dir := if pos=0 then `FORWARD else if pos = pmax then `BACKWARD else if pos > (Spread.get_pos !cur_spread) then `FORWARD else `BACKWARD;
+    show_spread ~pos:(pos,book_i) ()
   end
 
-let new_page gen_page () = new_pos (gen_page (idxes_on_disp ()),!book_idx)
+let new_page gen_page () = 
+  let cur_pages = idxes_on_disp () in
+  let new_page = gen_page cur_pages in
+  Printf.eprintf "NP - Cur: %s  New: %d" (cur_pages |> string_of_int_list "") new_page;
+  new_pos (new_page,!book_idx)
     
 let clear_spread_cache ?(book=current_book())() =
   Weak.fill book.spreads 0 (max_index ~book () + 1) None
@@ -532,7 +537,7 @@ let go_to_page_dialog () =
   let w = GWindow.dialog ~parent:window ~title:"Go to page" ~modal:true ~position:`CENTER () in
   ignore (GMisc.label ~text:"Page: " ~packing:w#vbox#add ());
   let sb = GEdit.spin_button ~packing:w#vbox#add ~digits:0 ~numeric:true () in
-  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float !disp_pos); (*sb#set_activates_default true;*)
+  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float (Spread.get_pos !cur_spread)); (*sb#set_activates_default true;*)
 
   let entry = new GEdit.entry (GtkEdit.Entry.cast sb#as_widget) in
   entry#set_activates_default true;
