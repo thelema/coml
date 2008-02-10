@@ -75,10 +75,9 @@ module Spread = struct
 	     mutable t_size: int * int;
 	     mutable scaler : Glib.Idle.id option;
 	     get_pic : int -> GdkPixbuf.pixbuf;
-	     dir : [`FORWARD | `BACKWARD];
 	   }
     
-  let null = { pos = -1; pixbuf = failed_load; idxes = []; t_size = (1,1); bits=8; scaler=None; o_width = 1; o_height = 1; get_pic = (fun _ -> failed_load); dir=`FORWARD}
+  let null = { pos = -1; pixbuf = failed_load; idxes = []; t_size = (1,1); bits=8; scaler=None; o_width = 1; o_height = 1; get_pic = (fun _ -> failed_load); }
 
   let get_idxes s = s.idxes
   let get_pos s = s.pos
@@ -103,12 +102,11 @@ module Spread = struct
 
 
   (* add a picture to the spread -- doesn't update the pixbuf*)
-  let add_pic s pic idx dir = 
+  let add_pic s pic idx = 
     let w1,h1 = pixbuf_size pic in
     s.o_width <- s.o_width + w1; s.o_height <- max s.o_height h1;
     s.idxes <- idx :: s.idxes; 
-    if opt.manga then s.idxes <- List.rev s.idxes;
-    if dir = `FORWARD then s.idxes <- List.rev s.idxes
+    if opt.manga then s.idxes <- List.rev s.idxes
       
   let freshen_pixbuf s =
     if List.length s.idxes > 1 then 
@@ -129,11 +127,11 @@ module Spread = struct
 
   let scale_idle ~post_scale spread () = 
     if is_vert spread.pixbuf && opt.twopage && List.length spread.idxes = 1 then begin
-      let next_idx = (match spread.dir with `FORWARD -> (+) | `BACKWARD -> (-)) 1 spread.pos in
+      let next_idx = spread.pos + 1 in
       let next_pic = spread.get_pic next_idx in
       if is_vert next_pic then begin
 (*	Printf.eprintf "Adding %d to spread %d\n" next_idx spread.pos;*)
-	add_pic spread next_pic next_idx spread.dir
+	add_pic spread next_pic next_idx
       end;
     end;
     
@@ -146,7 +144,7 @@ module Spread = struct
     spread.scaler <- None; 
     false
       
-  let make pos get_cache dir = 
+  let make pos get_cache = 
     let pic = get_cache pos in
     let out_w, out_h  = pixbuf_size pic 
     and out_bits = GdkPixbuf.get_bits_per_sample pic in
@@ -155,7 +153,7 @@ module Spread = struct
       o_width = out_w; o_height = out_h;
       bits = out_bits; pixbuf = pic;
       t_size = (out_w,out_h); scaler = None; 
-      get_pic = get_cache; dir = dir }
+      get_pic = get_cache; }
 
   let scale ?post_scale size spread =
     spread.t_size <- size;
@@ -170,7 +168,6 @@ type book = { title: string;
 	      mutable files: string array; 
 	      cache: GdkPixbuf.pixbuf Weak.t;
 	      spreads: Spread.t Weak.t}
-type library = {prev : book Stack.t; next : book Stack.t}
 let books = ref [| |]
 
 let numeric_compare s1 s2 = 
@@ -218,6 +215,7 @@ let is_archive fn = any_suffix archive_suffixes fn
 let is_picture fn = any_suffix pic_suffixes fn
 
 let extract_archive file dir =
+  Printf.eprintf "Extracting %s to %s\n" file dir;
   match archive_type file with
     | `Rar -> Sys.command (Printf.sprintf "rar x \"%s\" \"%s\"/" file dir)
     | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
@@ -248,7 +246,7 @@ let build_books l =
       let return_code = extract_archive h td in
       (* on quit, remove the extracted archive *)
       at_exit (fun () -> rec_del td);
-      if return_code = 0 && Sys.file_exists td then begin
+      if return_code = 0 && Sys.file_exists td then
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
 	and title = Filename.basename h in
@@ -257,11 +255,11 @@ List.iter (Printf.eprintf "%s\n") files;
 Printf.eprintf "Dirs:\n";
 List.iter (Printf.eprintf "%s\n") dirs;
 Printf.eprintf "Contents:\n";
-List.iter (Printf.eprintf "%s\n") contents;*)
+List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 	let acc' = files |> List.map (fun fn -> title,fn) |> List.append acc
 	and t' = List.rev_append dirs t in
 	  expand_list acc' t'
-      end else 
+      else 
 	expand_list acc t
     | h :: t when is_picture h ->
 	expand_list ((Filename.basename h,h)::acc) t
@@ -272,7 +270,7 @@ List.iter (Printf.eprintf "%s\n") contents;*)
     | (n1,p1)::t as l ->
 	let b1,rest = List.partition (fun (n,_) -> n = n1) l in
 	let files = b1|> List.rev_map snd|> List.filter is_picture in
-	let acc' = (make_book n1 files)::acc in
+	let acc' = if List.length files > 0 then (make_book n1 files)::acc else acc in
 	group_books acc' rest
   in
   books := l |> expand_list [] |> group_books [] |> Array.of_list
@@ -358,6 +356,7 @@ let array_without arr idx =
   Array.init (l-1) next
 
 let drop_book () =
+  Printf.eprintf "Removing book id %d\n" !book_idx; flush stdout;
   books := array_without !books !book_idx;
   if Array.length !books = 0 then begin
     Printf.printf "All Files Invalid\n";
@@ -403,14 +402,13 @@ let get_scache ?(book=current_book()) pos = try Weak.get book.spreads pos with I
 let put_scache ?(book=current_book()) spread = Weak.set book.spreads (Spread.get_pos spread) (Some spread)
 
 let cur_spread = ref Spread.null
-let move_dir = ref `FORWARD
 
 let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
 
 let get_spread ?(book=current_book()) pos = 
   match get_scache ~book pos with
       None -> 
-	let s = Spread.make pos get_cache !move_dir in
+	let s = Spread.make pos get_cache in
 	put_scache ~book s;
 	(*Printf.eprintf "Cache_miss %d  " pos;*)
 	s
@@ -436,21 +434,20 @@ let prev_page idxes =
 
 let next_page idxes = idxes |> List.fold_left max min_int |> (+)1
 
-let preload_taskid = ref None
-
-let preload_spread () = 
+let preload_spread = 
+  let preload_taskid = ref None in
   let preload_task () = 
     let idxes = idxes_on_disp() in
-    let next_pos = 
-      (match !move_dir with `FORWARD -> next_page | `BACKWARD -> prev_page) idxes in
+    let next_pos = next_page idxes in
     set_status (Printf.sprintf "Preloading: %d (iod: %s)" next_pos (idxes |> string_of_int_list ""));
     let next_spread = get_spread next_pos in
     Spread.scale (view_size ()) next_spread;
     preload_taskid := None;
     false
   in
-  if !preload_taskid = None then
-    preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
+  function () -> 
+    if !preload_taskid = None then
+      preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
 
 let show_spread = 
   let show_taskid = ref None in
@@ -468,12 +465,11 @@ let show_spread =
     show_taskid := None;
     false
   in
-  let ss ?pos () = 
+  fun ?pos () -> 
     (match pos with None -> () | Some (p_idx,b_idx) -> disp_pos := p_idx; book_idx := b_idx);
     file#set_text (try Glib.Convert.filename_to_utf8 (Filename.basename (get_page !disp_pos)) with Glib.Convert.Error (_,s) -> s);
     if !show_taskid = None then 
       show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
-  in ss
 	
 let first_page _ = 0
 let last_page _ = max_index ()
@@ -495,7 +491,6 @@ let rec new_pos (pos,book_i) =
     else 
       if pos = max_index () then set_status 
 	(if book_i = bmax then "At end of Library" else "At end of book");
-    move_dir := if pos=0 then `FORWARD else if pos = pmax then `BACKWARD else if pos > (Spread.get_pos !cur_spread) then `FORWARD else `BACKWARD;
     show_spread ~pos:(pos,book_i) ()
   end
 
@@ -606,7 +601,8 @@ let main () =
   (* If no args, assume "." as argument *)
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
   build_books arg_list;
-  if Array.length !books = 0 || max_index () = 0 then begin
+  Printf.eprintf "Books built %d: %s" (Array.length !books) (!books |> Array.to_list |> List.map (fun b -> max_index ~book:b ()) |> string_of_int_list ""); flush stderr;
+  if Array.length !books = 0 || max_index () <= 0 then begin
     Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
   end;
