@@ -49,8 +49,9 @@ let scale_raw (width,height) ~interp pixbuf =
   GdkPixbuf.scale ~dest:out_b ~width ~height ~interp pixbuf;
   out_b
 
+let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom)
+
 let ar_sizer t_size p_size fit =
-  let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom) in
   let zoom = 
     match fit with 
 	Fit_w -> fit_wid t_size p_size 
@@ -124,44 +125,43 @@ module Spread = struct
     else 
       s.pixbuf <- s.get_pic s.pos
 
-  let scale_idle size ~post_scale spread () = 
-    if is_vert spread.pixbuf && opt.twopage && List.length spread.idxes = 1 then begin
-      let next_idx = spread.pos + 1 in
-      let next_pic = spread.get_pic next_idx in
-      if is_vert next_pic then begin
-(*	Printf.eprintf "Adding %d to spread %d\n" next_idx spread.pos;*)
-	add_pic spread next_pic next_idx
-      end;
-    end;
-    
-    if not (fits_size size spread) then begin
-(*Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height; *)
-      freshen_pixbuf spread;
-      spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
-    end;
-    (match post_scale with None -> () | Some f -> f spread.pos spread.pixbuf);
-    spread.scaler <- None; 
-    false
-      
   let make pos get_cache = 
     let pic = get_cache pos in
-    let out_w, out_h  = pixbuf_size pic 
-    and out_bits = GdkPixbuf.get_bits_per_sample pic in
+    let out_w, out_h  = pixbuf_size pic in
     
     { pos = pos; idxes = [pos];
       o_width = out_w; o_height = out_h;
-      bits = out_bits; pixbuf = pic;
+      bits = GdkPixbuf.get_bits_per_sample pic; 
+      pixbuf = pic;
       scaler = None; 
       get_pic = get_cache; }
 
+      
   let scale ?post_scale size spread =
+    let scale_idle () =
+      if is_vert spread.pixbuf && opt.twopage && List.length spread.idxes = 1 then begin
+	let next_idx = spread.pos + 1 in
+	let next_pic = spread.get_pic next_idx in
+	if is_vert next_pic then begin
+	  (*	Printf.eprintf "Adding %d to spread %d\n" next_idx spread.pos;*)
+	  add_pic spread next_pic next_idx
+	end;
+      end;
+      
+      if not (fits_size size spread) then begin
+	(*Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height; *)
+	freshen_pixbuf spread;
+	spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
+      end;
+      (match post_scale with None -> () | Some f -> f spread.pos spread.pixbuf);
+      spread.scaler <- None; 
+      false
+    in
     (match spread.scaler with 
-	None -> ()
-      | Some tid -> Idle.remove tid);
+	 None -> ()
+       | Some tid -> Idle.remove tid);
     spread.scaler <- 
-      Some (Idle.add ~prio:scale_prio (scale_idle size ~post_scale spread));
-	  
-	
+      Some (Idle.add ~prio:scale_prio scale_idle)
 end
 
 
