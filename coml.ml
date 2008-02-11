@@ -83,12 +83,12 @@ module Spread = struct
     
   let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
     
-  let fits_t_size size s =
+  let fits_size size s =
     let ar_size = ar_sizer size (s.o_width,s.o_height) opt.fit in
     size_fits (pixbuf_size s.pixbuf) ar_size
 
   let quick_view size s = 
-    if fits_t_size size s then
+    if fits_size size s then
       s.pixbuf
     else 
       scale_ar size s.pixbuf
@@ -134,7 +134,7 @@ module Spread = struct
       end;
     end;
     
-    if not (fits_t_size size spread) then begin
+    if not (fits_size size spread) then begin
 (*Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height; *)
       freshen_pixbuf spread;
       spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
