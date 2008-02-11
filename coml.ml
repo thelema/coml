@@ -27,13 +27,11 @@ type options = { mutable wrap: bool;
 		 mutable remove_failed: bool; 
 		 mutable fit: scaling;
 		 mutable zoom_enlarge: bool;
-		 mutable rar_exe: string;
 	       }
 (* TODO: save and load options *)
 let opt = { wrap = false; fullscreen = false; 
 	    twopage = true; manga = true;
 	    remove_failed = true; fit = Fit_both; zoom_enlarge = false;
-	    rar_exe = "/home/thelema/bin/rar"
 	  }
 
 let preload_prio = 200 and show_prio = 115 and scale_prio = 150
@@ -65,6 +63,8 @@ let ar_sizer t_size p_size fit =
 let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
   let ar_size = ar_sizer t_size (pixbuf_size pixbuf) fit in
   scale_raw ar_size ~interp pixbuf
+    
+(*mutable t_size: int * int;*)
 
 module Spread = struct 
   type t = { pos: int;
@@ -72,24 +72,23 @@ module Spread = struct
 	     mutable o_width : int; mutable o_height: int;
 	     mutable idxes: int list;
 	     mutable pixbuf: GdkPixbuf.pixbuf; 
-	     mutable t_size: int * int;
 	     mutable scaler : Glib.Idle.id option;
 	     get_pic : int -> GdkPixbuf.pixbuf;
 	   }
     
-  let null = { pos = -1; pixbuf = failed_load; idxes = []; t_size = (1,1); bits=8; scaler=None; o_width = 1; o_height = 1; get_pic = (fun _ -> failed_load); }
+  let null = { pos = -1; pixbuf = failed_load; idxes = []; bits=8; scaler=None; o_width = 1; o_height = 1; get_pic = (fun _ -> failed_load); }
 
   let get_idxes s = s.idxes
   let get_pos s = s.pos
     
   let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
     
-  let fits_t_size s ?(t=s.t_size) () =
-    let ar_size = ar_sizer s.t_size (s.o_width,s.o_height) opt.fit in
+  let fits_t_size size s =
+    let ar_size = ar_sizer size (s.o_width,s.o_height) opt.fit in
     size_fits (pixbuf_size s.pixbuf) ar_size
 
-  let quick_view s ?(size=s.t_size) () = 
-    if fits_t_size s ~t:size () then
+  let quick_view size s = 
+    if fits_t_size size s then
       s.pixbuf
     else 
       scale_ar size s.pixbuf
@@ -105,7 +104,7 @@ module Spread = struct
   let add_pic s pic idx = 
     let w1,h1 = pixbuf_size pic in
     s.o_width <- s.o_width + w1; s.o_height <- max s.o_height h1;
-    s.idxes <- idx :: s.idxes; 
+    s.idxes <- s.idxes @ [idx]; 
     if opt.manga then s.idxes <- List.rev s.idxes
       
   let freshen_pixbuf s =
@@ -125,7 +124,7 @@ module Spread = struct
     else 
       s.pixbuf <- s.get_pic s.pos
 
-  let scale_idle ~post_scale spread () = 
+  let scale_idle size ~post_scale spread () = 
     if is_vert spread.pixbuf && opt.twopage && List.length spread.idxes = 1 then begin
       let next_idx = spread.pos + 1 in
       let next_pic = spread.get_pic next_idx in
@@ -135,10 +134,10 @@ module Spread = struct
       end;
     end;
     
-    if not (fits_t_size spread ()) then begin
+    if not (fits_t_size size spread) then begin
 (*Printf.eprintf "Resizing img (%s) to %dx%d\n" (string_of_int_list "" spread.idxes) width height; *)
       freshen_pixbuf spread;
-      spread.pixbuf <- scale_ar spread.t_size ~interp:`HYPER spread.pixbuf;
+      spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
     end;
     (match post_scale with None -> () | Some f -> f spread.pos spread.pixbuf);
     spread.scaler <- None; 
@@ -152,14 +151,16 @@ module Spread = struct
     { pos = pos; idxes = [pos];
       o_width = out_w; o_height = out_h;
       bits = out_bits; pixbuf = pic;
-      t_size = (out_w,out_h); scaler = None; 
+      scaler = None; 
       get_pic = get_cache; }
 
   let scale ?post_scale size spread =
-    spread.t_size <- size;
-    if spread.scaler = None then
-      spread.scaler <- 
-	Some (Idle.add ~prio:scale_prio (scale_idle ~post_scale spread));
+    (match spread.scaler with 
+	None -> ()
+      | Some tid -> Idle.remove tid);
+    spread.scaler <- 
+      Some (Idle.add ~prio:scale_prio (scale_idle size ~post_scale spread));
+	  
 	
 end
 
@@ -167,7 +168,8 @@ end
 type book = { title: string; 
 	      mutable files: string array; 
 	      cache: GdkPixbuf.pixbuf Weak.t;
-	      spreads: Spread.t Weak.t}
+	      spreads: Spread.t Weak.t;
+	      mutable max_loc : int; }
 let books = ref [| |]
 
 let numeric_compare s1 s2 = 
@@ -177,7 +179,9 @@ let numeric_compare s1 s2 =
     if i = l1 then -2 else if i = l2 then -1
     else if s1.[i] = s2.[i] then pos_diff (i+1) else i
   and num_end i s =
-    try if s.[i] >= '0' && s.[i] <= '9' then num_end (i+1) s else i with _ -> i-1
+    try 
+      if s.[i] >= '0' && s.[i] <= '9' then num_end (i+1) s else i 
+    with _ -> i-1
   in
   if l1 = l2 then String.compare s1 s2 
   else let d = pos_diff 0 in
@@ -194,10 +198,13 @@ let numeric_compare s1 s2 =
     end
 
 let make_book title files = 
-  let files = files |>  List.sort numeric_compare |> Array.of_list in
-  let cache = Weak.create (Array.length files) in
-  let scache = Weak.create (Array.length files) in
-  {title=title; files=files; cache=cache; spreads = scache}
+  let files = files |> Array.of_list in
+  let len = Array.length files in
+  Array.sort numeric_compare files;
+  Printf.eprintf "%s" (files |> Array.to_list |> String.concat "\n");
+  let cache = Weak.create len 
+  and scache = Weak.create len in
+  {title=title; files=files; cache=cache; spreads = scache; max_loc = len-1}
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -217,7 +224,7 @@ let is_picture fn = any_suffix pic_suffixes fn
 let extract_archive file dir =
   Printf.eprintf "Extracting %s to %s\n" file dir;
   match archive_type file with
-    | `Rar -> Sys.command (Printf.sprintf "rar x \"%s\" \"%s\"/" file dir)
+    | `Rar -> Sys.command (Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir)
     | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
     | `Sev_zip -> Sys.command (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
@@ -279,18 +286,15 @@ let book_idx = ref 0
 
 let current_book () = (!books).(!book_idx)
 
-let max_index ?(book = current_book()) () = 
-  Array.length book.files - 1
+let max_index ?(book = current_book()) () = book.max_loc
 
 let within_book_range ?(book=current_book()) x = 
-  x >=
- 0 && x <= max_index ()
+  x >= 0 && x <= book.max_loc
 
 let book_count () = Array.length !books
 
-let get_page ?(book=current_book()) idx = 
-  try book.files.(idx) with Invalid_argument _ -> "OOB"
-
+let get_page ?(book=current_book()) idx = if within_book_range ~book idx then book.files.(idx) else "OOB"
+	
 
 (* GTK WIDGETS *)
 
@@ -324,6 +328,7 @@ let pane = GPack.paned `VERTICAL ~packing:window#add ()
   let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
+
 let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
 
 let get_cache' ?(book=current_book()) idx =
@@ -333,11 +338,18 @@ let get_cache' ?(book=current_book()) idx =
       | None -> raise Not_found
   with Invalid_argument _ -> failed_load
 
+(*GtkMain.Rc.parse_string "gtk-font-name = \"Sans 8\"";*)
+(*let pango_layout = window#misc#pango_context#create_layout
+  Pango.Layout.set_text pango_layout (string_of_int idx);*)
+
+let make_thumb idx pic = 
+  let width = sidebar_width - 25 and height = 100 in
+  let scaled_pic = scale_ar (width,height) ~interp:`HYPER ~fit:Fit_both pic in
+  scaled_pic
+
 let set_cache ?(book=current_book()) idx v = 
   Weak.set book.cache idx (Some v); 
-  let width = sidebar_width - 25 and height = 100 in
-  let scaled_pic = scale_ar (width,height) ~interp:`HYPER ~fit:Fit_both v in
-  tn_store#set ~row:(tn_store#append ()) ~column:sb_col_tn scaled_pic
+  tn_store#set ~row:(tn_store#append ()) ~column:sb_col_tn (make_thumb idx v)
 
 let print_cache ?(book=current_book()) () = 
   Printf.eprintf "Cache: {";
@@ -377,20 +389,22 @@ set_status (Printf.sprintf "Removing page %d of %d" idx (max_index ~book ()));
 let rec load_cache ~book idx =
 (*set_status (Printf.sprintf "Loading page %d of %d: %b" idx (max_index ~book ()) (within_book_range ~book idx));*)
   if within_book_range ~book idx then 
-    let page_file = get_page idx in
     try 
-(*      set_status (Printf.sprintf "Loading img %d from %s" idx page_file);*)
-      let pic = GdkPixbuf.from_file page_file in
-      set_cache idx pic
-    with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg ->
-      (*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
-	    ~buttons:GWindow.Buttons.close ~show:true () in
-	    ignore(d#run ()); *)
-      set_status (Printf.sprintf "Failed to load %s: %s" page_file msg);
-      if opt.remove_failed then
-	( remove_file ~book idx; load_cache ~book idx )
-      else
-	set_cache idx failed_load
+      let page_file = get_page idx in
+      try 
+	(*      set_status (Printf.sprintf "Loading img %d from %s" idx page_file);*)
+	let pic = GdkPixbuf.from_file page_file in
+	set_cache idx pic
+      with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg ->
+	(*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
+	      ~buttons:GWindow.Buttons.close ~show:true () in
+	      ignore(d#run ()); *)
+	set_status (Printf.sprintf "Failed to load %s: %s" page_file msg);
+	if opt.remove_failed then
+	  ( remove_file ~book idx; load_cache ~book idx )
+	else
+	  set_cache idx failed_load
+    with Invalid_argument _ -> set_status ("Failed to get filename")
 
 let get_cache ?(book=current_book()) idx = 
 (*Printf.eprintf "get_c %d\n" idx;*)
@@ -415,6 +429,8 @@ let get_spread ?(book=current_book()) pos =
     | Some s -> (*Printf.eprintf "Cache_hit %d  " pos; *) s
 
 let idxes_on_disp () = Spread.get_idxes !cur_spread
+let first_on_disp () = idxes_on_disp () |> List.fold_left min max_int
+let last_on_disp () = idxes_on_disp () |> List.fold_left max min_int
 
 let display pos pic = 
   set_status (Printf.sprintf "Displaying pos %d" pos);
@@ -445,7 +461,7 @@ let preload_spread =
     preload_taskid := None;
     false
   in
-  function () -> 
+  fun () -> 
     if !preload_taskid = None then
       preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
 
@@ -457,11 +473,12 @@ let show_spread =
     let spread = get_spread pos in
     cur_spread := spread;
     Spread.scale ~post_scale:display (view_size ()) spread;
-    display pos (Spread.quick_view spread ());
-    preload_spread ();
+    display pos (Spread.quick_view (view_size ()) spread);
 
     (* draw the screen *)
     ignore (Glib.Main.iteration true);
+    preload_spread ();
+
     show_taskid := None;
     false
   in
