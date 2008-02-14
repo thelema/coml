@@ -94,13 +94,14 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
 
 
 (* SPREAD TYPE AND MANIPULATION OF SUCH *)    
-  type spread = { pic1: GdkPixbuf.pixbuf; 
-	     pic2: GdkPixbuf.pixbuf option; 
-	     o_width : int; o_height: int;
-	     mutable idxes: int list;
-	     mutable pixbuf: GdkPixbuf.pixbuf; 
-	     mutable scaler : Glib.Idle.id option;
-	   }
+type spread = { pic1: GdkPixbuf.pixbuf; 
+		pic2: GdkPixbuf.pixbuf option; 
+		o_width : int; o_height: int;
+		idxes: int list;
+		files : string list; 
+		mutable pixbuf: GdkPixbuf.pixbuf; 
+		mutable scaler : Glib.Idle.id option;
+	      }
     
 (*  let null = { pic1 = failed_load; pic2 = None; pixbuf = failed_load; idxes = []; scaler=None; o_width = 1; o_height = 1; }*)
 
@@ -114,12 +115,6 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
   let fits_size size s =
     let ar_size = ar_sizer size (s.o_width,s.o_height) opt.fit in
     size_fits (pixbuf_size s.pixbuf) ar_size
-
-  let quick_view size s = 
-    if fits_size size s then
-      s.pixbuf
-    else 
-      scale_ar size s.pixbuf
 
   let pics_of_idxes get_cache idxes = idxes
 	   |> List.map get_cache 
@@ -148,19 +143,18 @@ Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
 	    GdkPixbuf.copy_area ~dest:out_buf ~dest_x:w ~dest_y:dest_y2 p2;
 	    out_buf
 
-  let make1 pos p1 = 
+  let make1 pos fl p1 = 
     let w1,h1 = pixbuf_size p1 in
-    { idxes = [pos];
+    { idxes = [pos]; files = fl;
       o_width = w1; o_height = h1;
       pixbuf = p1;
       pic1=p1; pic2=None;
       scaler = None; }
       
-  let make2 pos p1 p2= 
+  let make2 pos fl p1 p2= 
     let w1,h1 = pixbuf_size p1 
     and w2,h2 = pixbuf_size p2 in
-    let idxes = if opt.manga then [pos+1;pos] else [pos;pos+1] in
-    { idxes = idxes;
+    { idxes = [pos; pos+1]; files = fl;
       o_width = w1+w2; o_height = max h1 h2;
       pic1 = p1; pic2 = Some p2;
       pixbuf = p1;
@@ -176,7 +170,7 @@ Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
 	  freshen_pixbuf spread;
 	  spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
 	end;
-	(match post_scale with None -> () | Some f -> f spread.pixbuf);
+	(match post_scale with None -> () | Some f -> f spread);
 (*      end;*)
       false
     in
@@ -214,28 +208,24 @@ let numeric_compare s1 s2 =
 type node = { mutable next : node; 
 	      mutable prev: node;
 	      book : book;
-	      files : string list; 
 	      spread : spread; }
 and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
 	     mutable more_files : string list; (* all files not yet made into nodes *)
-(*	     cache: GdkPixbuf.pixbuf Weak.t;*)
-	     (*spreads: Spread.t Weak.t;*)
-	     mutable max_loc : int;
 	   }
 
 let gen_page b () = 
   let page1 f p = 
     let pos_n = (last_idx b.last_page.spread + 1) in
-    let sn = make1 pos_n p in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; files=[f]; spread = sn} in
+    let sn = make1 pos_n [f] p in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   and page2 fl p1 p2 =
     let pos_n = (last_idx b.last_page.spread + 1) in
-    let sn = make2 pos_n p1 p2 in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; files=fl; spread = sn} in
+    let sn = make2 pos_n fl p1 p2 in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   in
@@ -257,17 +247,14 @@ let gen_page b () =
 
 let make_book title files = 
   let files = files |> Array.of_list in
-  let len = Array.length files in
   Array.sort numeric_compare files; (* TODO: schwarzian transform *)
   let files = files |> Array.to_list in
   match files with [] -> None 
     | p0 :: rest -> 
-(*	let cache = Weak.create len in*)
-	let s0 = make1 0 (GdkPixbuf.from_file p0) in
-	let rec n = {next=n; prev=n; book=b; files=[p0]; spread=s0}
-	and b = {title=title; more_files=rest; max_loc = len-1; first_page = n; last_page = n; } in
+	let s0 = make1 0 [p0] (GdkPixbuf.from_file p0) in
+	let rec n = {next=n; prev=n; book=b; spread=s0}
+	and b = {title=title; more_files=rest; first_page=n; last_page=n; } in
 	Some b
-
 
 
 let books = ref [| |]
@@ -352,142 +339,46 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 	    | Some b -> b :: acc in
 	group_books acc' rest
   in
-  books := l |> expand_list [] |> group_books [] |> Array.of_list
-
-
-let book_idx = ref 0
-
-let current_book () = (!books).(!book_idx)
-
-let max_index ?(book = current_book()) () = last_idx book.last_page.spread
-
-let within_book_range ?(book=current_book()) x = 
-  x >= 0 && x <= max_index ~book ()
-
-let book_count () = Array.length !books
-
-(*
-let get_page ?(book=current_book()) idx = 
-  if within_book_range ~book idx 
-  then book.files.(idx) else "OOB"
-*)	
-(*
-let get_cache' ?(book=current_book()) idx =
-  try 
-    match Weak.get book.cache idx with
-	Some cb -> cb
-      | None -> raise Not_found
-  with Invalid_argument _ -> failed_load
-
-(*GtkMain.Rc.parse_string "gtk-font-name = \"Sans 8\"";*)
-(*let pango_layout = window#misc#pango_context#create_layout
-  Pango.Layout.set_text pango_layout (string_of_int idx);*)
-
-let set_cache ?(book=current_book()) idx v = 
-  Weak.set book.cache idx (Some v)
-
-let print_cache ?(book=current_book()) () = 
-  Printf.eprintf "Cache: {";
-  let print_pic = function 
-      None -> Printf.eprintf "None-" 
-    | Some _ -> Printf.eprintf "L-"
-  in
-  for i = 0 to max_index ~book () do
-    print_pic (Weak.get_copy book.cache i);
+  books := l |> expand_list [] |> group_books [] |> Array.of_list;
+  let last = Array.length !books - 1 in
+  for i = 1 to last do
+    !books.(i-1).last_page.next <- !books.(i).first_page;
+    !books.(i).first_page.prev <- !books.(i-1).last_page;
   done;
-  Printf.eprintf "}\n"
-*)
+  !books.(last).last_page.next <- !books.(0).first_page;
+  !books.(0).first_page.prev <- !books.(last).last_page
+;;
+ 
 
-let array_without arr idx = 
-  let l = Array.length arr in
-  let next i = if i < idx then arr.(i) else arr.(i+1) in
-  Array.init (l-1) next
-
-
-let drop_book () =
-  Printf.eprintf "Removing book id %d\n" !book_idx; flush stdout;
-  books := array_without !books !book_idx;
-  if Array.length !books = 0 then begin
-    Printf.printf "All Files Invalid\n";
-    Printf.printf "Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
-    Main.quit ()
-  end;
-  book_idx := min (Array.length !books - 1) !book_idx
-	
-(*
-let remove_file ~book idx = 
-set_status (Printf.sprintf "Removing page %d of %d" idx (max_index ~book ()));
-  assert (within_book_range ~book idx);
-  let next i = if i < idx then book.files.(i) else book.files.(i+1) in
-  if max_index ~book () = 0 then 
-    drop_book ()
-  else 
-    book.files <- Array.init (max_index ()) next
-    
-let rec load_cache ~book idx =
-(*set_status (Printf.sprintf "Loading page %d of %d: %b" idx (max_index ~book ()) (within_book_range ~book idx));*)
-  if within_book_range ~book idx then 
-    try 
-      let page_file = get_page idx in
-      try 
-	set_status (Printf.sprintf "Loading img %d from %s" idx page_file);
-	let pic = GdkPixbuf.from_file page_file in
-	set_cache idx pic
-
-	if opt.remove_failed then
-	  ( remove_file ~book idx; load_cache ~book idx )
-	else
-	  set_cache idx failed_load
-    with Invalid_argument _ -> set_status ("Failed to get filename")
-
-let get_cache ?(book=current_book()) idx = 
-  try get_cache' ~book idx 
-  with Not_found -> load_cache ~book idx; get_cache' ~book idx
-*)
-(*
-let get_scache ?(book=current_book()) pos = Weak.get book.spreads pos
-
-let put_scache ?(book=current_book()) spread = Weak.set book.spreads (Spread.get_pos spread) (Some spread)
-*)
-
+      
 let cur_node = ref (Obj.magic 0)
 
 let idxes_on_disp () = !cur_node.spread.idxes
 
-(*
-let get_spread ?(book=current_book()) pos = 
-  match get_scache ~book pos with
-      None -> 
-	let p1 = get_cache pos in
-	let p2 = get_cache (pos + 1) in
-	let s = Spread.make pos p1 p2 in
-	put_scache ~book s;
-	s
-    | Some s -> s
-*)
+let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page.spread
 
-let display pic = 
+let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
+
+let display s = 
+  let size = view_size () in
+  let pic = 
+    if fits_size size s 
+    then s.pixbuf
+    else scale_ar size s.pixbuf
+  in
   image1#set_pixbuf pic;
-  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (idxes_on_disp () |> string_of_int_list "") (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title)
+  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (s.idxes |> string_of_int_list "") (max_index ()) !cur_node.book.title)
 
-(*
 let preload_spread = 
   let preload_taskid = ref None in
   let preload_task () = 
     preload_taskid := None;
-    let idxes = idxes_on_disp() in
-    let next_pos = next_page idxes in
-    if next_pos <= max_index () then begin
-      set_status (Printf.sprintf "Preloading: %d (iod: %s)" next_pos (idxes |> string_of_int_list ""));
-      let next_spread = get_spread next_pos in
-      Spread.scale (ref next_pos) (view_size ()) next_spread;
-    end;
+    scale (view_size ()) !cur_node.next.spread;
     false
   in
   fun () -> 
     if !preload_taskid = None then
       preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
-*)
 
 
 
@@ -497,16 +388,14 @@ let show_spread =
     show_taskid := None;
     let spread = !cur_node.spread in
     scale ~post_scale:display (view_size ()) spread;
-    display (quick_view (view_size ()) spread);
+    display spread;
 
     (* draw the screen *)
     ignore (Glib.Main.iteration true);
-(*    preload_spread ();*)
-
+    preload_spread ();
     false
   in
   fun () -> 
-    window#set_title (Printf.sprintf "Image_idx of %d, Book %d of %d : %s" (*(!disp_pos)*) (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title);
     if !show_taskid = None then 
       show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
 
@@ -651,8 +540,8 @@ let main () =
   (* If no args, assume "." as argument *)
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
   build_books arg_list;
-  Printf.eprintf "Books built %d: %s" (Array.length !books) (!books |> Array.to_list |> List.map (fun b -> max_index ~book:b ()) |> string_of_int_list ""); flush stderr;
-  if Array.length !books = 0 || max_index () <= 0 then begin
+  Printf.eprintf "Books built %d" (Array.length !books); flush stderr;
+  if Array.length !books = 0 then begin
     Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
   end;
@@ -670,7 +559,7 @@ let main () =
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
   
-  new_page (fun _ -> !books.(0).first_page) ();
+  new_page (fun () -> cur_node := !books.(0).first_page) ();
   window#show ();
   Array.iteri (fun i b -> ignore(Idle.add ~prio:(gen_page_prio+i) (gen_page b))) !books;
   Main.main () (* calls the GTK main event loop *)
