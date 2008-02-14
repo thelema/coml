@@ -20,8 +20,7 @@ open GMain
    
 type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
-type options = { mutable wrap: bool; 
-		 mutable fullscreen: bool;
+type options = { mutable fullscreen: bool;
 		 mutable twopage: bool;
 		 mutable manga: bool;
 		 mutable remove_failed: bool; 
@@ -29,14 +28,42 @@ type options = { mutable wrap: bool;
 		 mutable zoom_enlarge: bool;
 	       }
 (* TODO: save and load options *)
-let opt = { wrap = false; fullscreen = false; 
+let opt = { fullscreen = false; 
 	    twopage = true; manga = true;
 	    remove_failed = true; fit = Fit_both; zoom_enlarge = false;
 	  }
 
-let preload_prio = 150 and show_prio = 115 and scale_prio = 200
+
+(* GTK WIDGETS *)
+
+let window_width = 900 and window_height = 700
+
+let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:window_width ~height:window_height ()
+
+let pane = GPack.paned `VERTICAL ~packing:window#add ()
+
+ let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
+ let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
+ let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
+
+ let footer = GPack.hbox ~packing:pane#pack2 ()
+  let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
+  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+  let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
+  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+  let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
+(*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
+
+(* GUI utility functions *)
+let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
+let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
+
+
+let preload_prio = 150 and show_prio = 115 and scale_prio = 200 and gen_page_prio = 210
 
 let failed_load = GdkPixbuf.create 1 1 ()
+
+(* PIXBUF RESIZING FUNCTIONS *)
 
 let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
 
@@ -64,10 +91,10 @@ let ar_sizer t_size p_size fit =
 let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
   let ar_size = ar_sizer t_size (pixbuf_size pixbuf) fit in
   scale_raw ar_size ~interp pixbuf
-    
-module Spread = struct 
-  type t = { pos: int;
-	     pic1: GdkPixbuf.pixbuf; 
+
+
+(* SPREAD TYPE AND MANIPULATION OF SUCH *)    
+  type spread = { pic1: GdkPixbuf.pixbuf; 
 	     pic2: GdkPixbuf.pixbuf option; 
 	     o_width : int; o_height: int;
 	     mutable idxes: int list;
@@ -75,10 +102,12 @@ module Spread = struct
 	     mutable scaler : Glib.Idle.id option;
 	   }
     
-  let null = { pos = -1; pic1 = failed_load; pic2 = None; pixbuf = failed_load; idxes = []; scaler=None; o_width = 1; o_height = 1; }
+(*  let null = { pic1 = failed_load; pic2 = None; pixbuf = failed_load; idxes = []; scaler=None; o_width = 1; o_height = 1; }*)
 
   let get_idxes s = s.idxes
-  let get_pos s = s.pos
+  let first_idx s = s.idxes |> List.fold_left min max_int
+  let last_idx s = s.idxes |> List.fold_left max min_int
+  let get_pos s = first_idx s
     
   let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
     
@@ -119,34 +148,36 @@ Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
 	    GdkPixbuf.copy_area ~dest:out_buf ~dest_x:w ~dest_y:dest_y2 p2;
 	    out_buf
 
-  let make pos p1 p2 = 
+  let make1 pos p1 = 
+    let w1,h1 = pixbuf_size p1 in
+    { idxes = [pos];
+      o_width = w1; o_height = h1;
+      pixbuf = p1;
+      pic1=p1; pic2=None;
+      scaler = None; }
+      
+  let make2 pos p1 p2= 
     let w1,h1 = pixbuf_size p1 
     and w2,h2 = pixbuf_size p2 in
-    if opt.twopage && h1>w1 && h2>w2 then
-      let idxes = if opt.manga then [pos+1;pos] else [pos;pos+1] in
-      { pos = pos; idxes = idxes;
-	o_width = w1+w2; o_height = max h1 h2;
-	pic1 = p1; pic2 = Some p2;
-	pixbuf = p1;
-	scaler = None; }
-    else 
-      { pos = pos; idxes = [pos];
-	o_width = w1; o_height = h1;
-	pixbuf = p1;
-	pic1=p1; pic2=None;
-	scaler = None; }
+    let idxes = if opt.manga then [pos+1;pos] else [pos;pos+1] in
+    { idxes = idxes;
+      o_width = w1+w2; o_height = max h1 h2;
+      pic1 = p1; pic2 = Some p2;
+      pixbuf = p1;
+      scaler = None; }
       
-  let scale disp_pos ?post_scale size spread =
+  let scale ?post_scale size spread =
     let scale_idle () =
       spread.scaler <- None; 
-      if spread.pos >= !disp_pos && !disp_pos - spread.pos < 4 then begin
+(*      let pos = get_pos spread in
+      if !disp_pos >= pos && !disp_pos < pos + 4 then begin (* don't bother scaling if far away from current position *)*)
 	if not (fits_size size spread) then begin
 	  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" spread.idxes);
 	  freshen_pixbuf spread;
 	  spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
 	end;
 	(match post_scale with None -> () | Some f -> f spread.pixbuf);
-      end;
+(*      end;*)
       false
     in
     (match spread.scaler with 
@@ -154,15 +185,6 @@ Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
        | Some tid -> Idle.remove tid);
     spread.scaler <- 
       Some (Idle.add ~prio:scale_prio scale_idle)
-end
-
-
-type book = { title: string; 
-	      mutable files: string array; 
-	      cache: GdkPixbuf.pixbuf Weak.t;
-	      spreads: Spread.t Weak.t;
-	      mutable max_loc : int; }
-let books = ref [| |]
 
 let numeric_compare s1 s2 = 
   let l1 = String.length s1 and l2 = String.length s2 in
@@ -189,15 +211,67 @@ let numeric_compare s1 s2 =
       Int64.compare n1 n2
     end
 
+type node = { mutable next : node; 
+	      mutable prev: node;
+	      book : book;
+	      files : string list; 
+	      spread : spread; }
+and book = { title: string;
+	     mutable first_page : node; 
+	     mutable last_page : node; 
+	     mutable more_files : string list; (* all files not yet made into nodes *)
+(*	     cache: GdkPixbuf.pixbuf Weak.t;*)
+	     (*spreads: Spread.t Weak.t;*)
+	     mutable max_loc : int;
+	   }
+
+let gen_page b () = 
+  let page1 f p = 
+    let pos_n = (last_idx b.last_page.spread + 1) in
+    let sn = make1 pos_n p in
+    let n1 = {next = b.first_page; prev=b.last_page; book=b; files=[f]; spread = sn} in
+    b.last_page.next <- n1; b.last_page <- n1;
+    true
+  and page2 fl p1 p2 =
+    let pos_n = (last_idx b.last_page.spread + 1) in
+    let sn = make2 pos_n p1 p2 in
+    let n1 = {next = b.first_page; prev=b.last_page; book=b; files=fl; spread = sn} in
+    b.last_page.next <- n1; b.last_page <- n1;
+    true
+  in
+  match b.more_files with [] -> false
+    | f1 :: rest -> 
+	b.more_files <- rest;
+	let p1 = GdkPixbuf.from_file f1 in
+	if opt.twopage && is_vert p1 then
+	  match b.more_files with 
+	      [] -> page1 f1 p1
+	    | f2 :: rest -> 
+		b.more_files <- rest; 
+		let p2 = GdkPixbuf.from_file f2 in
+		if is_vert p2 
+		then page2 [f1; f2] p1 p2
+		else (ignore(page1 f1 p1); page1 f2 p2)
+	else 
+	  page1 f1 p1
+
 let make_book title files = 
   let files = files |> Array.of_list in
   let len = Array.length files in
-  Array.sort numeric_compare files;
-(*  Printf.eprintf "Making book %s\n" title; 
-  Printf.eprintf "%s" (files |> Array.to_list |> String.concat "\n"); *)
-  let cache = Weak.create len 
-  and scache = Weak.create len in
-  {title=title; files=files; cache=cache; spreads = scache; max_loc = len-1}
+  Array.sort numeric_compare files; (* TODO: schwarzian transform *)
+  let files = files |> Array.to_list in
+  match files with [] -> None 
+    | p0 :: rest -> 
+(*	let cache = Weak.create len in*)
+	let s0 = make1 0 (GdkPixbuf.from_file p0) in
+	let rec n = {next=n; prev=n; book=b; files=[p0]; spread=s0}
+	and b = {title=title; more_files=rest; max_loc = len-1; first_page = n; last_page = n; } in
+	Some b
+
+
+
+let books = ref [| |]
+
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -272,10 +346,14 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
     | (n1,p1)::t as l ->
 	let b1,rest = List.partition (fun (n,_) -> n = n1) l in
 	let files = b1|> List.rev_map snd|> List.filter is_picture in
-	let acc' = if List.length files > 0 then (make_book n1 files)::acc else acc in
+	let acc' = 
+	  match make_book n1 files with
+	      None -> acc
+	    | Some b -> b :: acc in
 	group_books acc' rest
   in
   books := l |> expand_list [] |> group_books [] |> Array.of_list
+
 
 let book_idx = ref 0
 
@@ -288,32 +366,12 @@ let within_book_range ?(book=current_book()) x =
 
 let book_count () = Array.length !books
 
-let get_page ?(book=current_book()) idx = if within_book_range ~book idx then book.files.(idx) else "OOB"
-	
-
-(* GTK WIDGETS *)
-
-let window_width = 900 and window_height = 700
-
-let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true ~width:window_width ~height:window_height ()
-
-let pane = GPack.paned `VERTICAL ~packing:window#add ()
-
- let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
- let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
- let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
-
- let footer = GPack.hbox ~packing:pane#pack2 ()
-  let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
-  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-  let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
-  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-  let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
-(*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
-
-
-let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
-
+(*
+let get_page ?(book=current_book()) idx = 
+  if within_book_range ~book idx 
+  then book.files.(idx) else "OOB"
+*)	
+(*
 let get_cache' ?(book=current_book()) idx =
   try 
     match Weak.get book.cache idx with
@@ -338,11 +396,13 @@ let print_cache ?(book=current_book()) () =
     print_pic (Weak.get_copy book.cache i);
   done;
   Printf.eprintf "}\n"
+*)
 
 let array_without arr idx = 
   let l = Array.length arr in
   let next i = if i < idx then arr.(i) else arr.(i+1) in
   Array.init (l-1) next
+
 
 let drop_book () =
   Printf.eprintf "Removing book id %d\n" !book_idx; flush stdout;
@@ -354,6 +414,7 @@ let drop_book () =
   end;
   book_idx := min (Array.length !books - 1) !book_idx
 	
+(*
 let remove_file ~book idx = 
 set_status (Printf.sprintf "Removing page %d of %d" idx (max_index ~book ()));
   assert (within_book_range ~book idx);
@@ -362,7 +423,7 @@ set_status (Printf.sprintf "Removing page %d of %d" idx (max_index ~book ()));
     drop_book ()
   else 
     book.files <- Array.init (max_index ()) next
-      
+    
 let rec load_cache ~book idx =
 (*set_status (Printf.sprintf "Loading page %d of %d: %b" idx (max_index ~book ()) (within_book_range ~book idx));*)
   if within_book_range ~book idx then 
@@ -372,11 +433,7 @@ let rec load_cache ~book idx =
 	set_status (Printf.sprintf "Loading img %d from %s" idx page_file);
 	let pic = GdkPixbuf.from_file page_file in
 	set_cache idx pic
-      with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg ->
-	(*    let d = GWindow.message_dialog ~message:msg ~message_type:`ERROR
-	      ~buttons:GWindow.Buttons.close ~show:true () in
-	      ignore(d#run ()); *)
-	set_status (Printf.sprintf "Failed to load %s: %s" page_file msg);
+
 	if opt.remove_failed then
 	  ( remove_file ~book idx; load_cache ~book idx )
 	else
@@ -386,15 +443,18 @@ let rec load_cache ~book idx =
 let get_cache ?(book=current_book()) idx = 
   try get_cache' ~book idx 
   with Not_found -> load_cache ~book idx; get_cache' ~book idx
-
+*)
+(*
 let get_scache ?(book=current_book()) pos = Weak.get book.spreads pos
 
 let put_scache ?(book=current_book()) spread = Weak.set book.spreads (Spread.get_pos spread) (Some spread)
+*)
 
-let cur_spread = ref Spread.null
+let cur_node = ref (Obj.magic 0)
 
-let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
+let idxes_on_disp () = !cur_node.spread.idxes
 
+(*
 let get_spread ?(book=current_book()) pos = 
   match get_scache ~book pos with
       None -> 
@@ -404,28 +464,13 @@ let get_spread ?(book=current_book()) pos =
 	put_scache ~book s;
 	s
     | Some s -> s
-
-let idxes_on_disp () = Spread.get_idxes !cur_spread
-let first_on_disp () = idxes_on_disp () |> List.fold_left min max_int
-let last_on_disp () = idxes_on_disp () |> List.fold_left max min_int
+*)
 
 let display pic = 
   image1#set_pixbuf pic;
   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %d of %d : %s" (idxes_on_disp () |> string_of_int_list "") (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title)
 
-let prev_page idxes = 
-  let i = idxes |> List.fold_left min max_int in
-  if opt.twopage then (* try to move back two pages *)
-    try 
-      let s = get_spread (i-2) in
-      if List.mem (i-1) (Spread.get_idxes s) 
-      then i-2
-      else i-1
-    with Invalid_argument _ -> i-1
-  else i-1
-
-let next_page idxes = idxes |> List.fold_left max min_int |> (+)1
-
+(*
 let preload_spread = 
   let preload_taskid = ref None in
   let preload_task () = 
@@ -442,33 +487,31 @@ let preload_spread =
   fun () -> 
     if !preload_taskid = None then
       preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
+*)
+
+
 
 let show_spread = 
   let show_taskid = ref None in
-  let disp_pos = ref 0 in
   let cur_spread_task () =
     show_taskid := None;
-    let pos = !disp_pos in
-    let spread = get_spread pos in
-    cur_spread := spread;
-    Spread.scale disp_pos ~post_scale:display (view_size ()) spread;
-    display (Spread.quick_view (view_size ()) spread);
+    let spread = !cur_node.spread in
+    scale ~post_scale:display (view_size ()) spread;
+    display (quick_view (view_size ()) spread);
 
     (* draw the screen *)
     ignore (Glib.Main.iteration true);
-    preload_spread ();
+(*    preload_spread ();*)
 
     false
   in
-  fun ?pos () -> 
-    (match pos with None -> () | Some (p_idx,b_idx) -> disp_pos := p_idx; book_idx := b_idx);
-    window#set_title (Printf.sprintf "Image_idx %d of %d, Book %d of %d : %s" (!disp_pos) (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title);
+  fun () -> 
+    window#set_title (Printf.sprintf "Image_idx of %d, Book %d of %d : %s" (*(!disp_pos)*) (max_index ()) (!book_idx+1) (book_count()) !books.(!book_idx).title);
     if !show_taskid = None then 
       show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
-	
-let first_page _ = 0
-let last_page _ = max_index ()
 
+
+(*
 let rec new_pos (pos,book_i) =
   let b0 = 0 and bmax = Array.length !books - 1 in
   let book_i = min bmax (max b0 book_i) in
@@ -488,20 +531,23 @@ let rec new_pos (pos,book_i) =
 	(if book_i = bmax then "At end of Library" else "At end of book");
     show_spread ~pos:(pos,book_i) ()
   end
+*)
+
+let next_page n = n.next
+let prev_page n = n.prev
+let first_page n = n.book.first_page
+let last_page n = n.book.last_page
 
 let new_page gen_page () = 
-  let cur_pages = idxes_on_disp () in
-  let new_page = gen_page cur_pages in
-  Printf.eprintf "NP - Cur: %s  New: %d\n" (cur_pages |> string_of_int_list "") new_page;
-  new_pos (new_page,!book_idx)
+  cur_node := gen_page !cur_node;
+  show_spread ()
     
-let clear_spread_cache ?(book=current_book())() =
-  Weak.fill book.spreads 0 (max_index ~book () + 1) None
-
+(*
 let toggle_twopage () =
   opt.twopage <- not opt.twopage;
   clear_spread_cache ();
   show_spread ()
+*)
 
 let enter_fullscreen () = 
   opt.fullscreen <- true;
@@ -520,14 +566,15 @@ let toggle_fullscreen () =
 
 let toggle_manga () =
   opt.manga <- not opt.manga;
-  clear_spread_cache ();
   show_spread()
+
+(* FIX new_pos 
 
 let go_to_page_dialog () =
   let w = GWindow.dialog ~parent:window ~title:"Go to page" ~modal:true ~position:`CENTER () in
   ignore (GMisc.label ~text:"Page: " ~packing:w#vbox#add ());
   let sb = GEdit.spin_button ~packing:w#vbox#add ~digits:0 ~numeric:true () in
-  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float (Spread.get_pos !cur_spread)); (*sb#set_activates_default true;*)
+  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float (get_pos !cur_node.spread)); (*sb#set_activates_default true;*)
 
   let entry = new GEdit.entry (GtkEdit.Entry.cast sb#as_widget) in
   entry#set_activates_default true;
@@ -539,12 +586,12 @@ let go_to_page_dialog () =
   match w#run () with
     | `DELETE_EVENT | `CANCEL -> w#destroy ()
     | `OK -> on_ok ()
+*)
 
 let zoom ar_val ar_func = 
   opt.fit <-( match opt.fit with
 		    Fit_both | Fit_w | Fit_h -> Zoom ar_val
 		  | Zoom ar -> ar_func ar);
-  clear_spread_cache ();
   show_spread()
 
 let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
@@ -561,13 +608,13 @@ let actions = [(_q, Main.quit);
 	    (_Right, new_page next_page); (_Down, new_page next_page); 
 	    (_space, new_page next_page);
 	    (_f, toggle_fullscreen); (_F11, toggle_fullscreen);
-	    (_Escape, exit_fullscreen); (_t, toggle_twopage);
+	    (_Escape, exit_fullscreen); (*(_t, toggle_twopage);*)
 	    (_m, toggle_manga); (_z, toggle_zoom);
 	    (_minus, zoom_out); (_plus, zoom_in);
 (*	    (_l, (fun () -> load_cache (List.fold_left min 0 !image_idxes)));*)
-	    (_w, (fun () -> opt.wrap <- not opt.wrap));
+(*	    (_w, (fun () -> opt.wrap <- not opt.wrap));*)
 	    (_Page_Up, new_page first_page); (_Page_Down, new_page last_page);
-	    (_g, go_to_page_dialog);
+(*	    (_g, go_to_page_dialog);*)
 	    (_o, (fun () -> ignore (idxes_on_disp ())));
 	   ]
 
@@ -615,9 +662,9 @@ let main () =
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
   
-  new_pos (0,0);
+  new_page (fun _ -> !books.(0).first_page) ();
   window#show ();
-(*  prescale_cache ();*)
+  Array.iteri (fun i b -> ignore(Idle.add ~prio:(gen_page_prio+i) (gen_page b))) !books;
   Main.main () (* calls the GTK main event loop *)
     
 let _ = main ()
