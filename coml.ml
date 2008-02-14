@@ -229,13 +229,13 @@ let gen_page b () =
   let page1 f p = 
     let pos_n = (last_idx b.last_page.spread + 1) in
     let sn = make1 pos_n p in
-    let n1 = {next = b.first_page; prev=b.last_page; book=b; files=[f]; spread = sn} in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; files=[f]; spread = sn} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   and page2 fl p1 p2 =
     let pos_n = (last_idx b.last_page.spread + 1) in
     let sn = make2 pos_n p1 p2 in
-    let n1 = {next = b.first_page; prev=b.last_page; book=b; files=fl; spread = sn} in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; files=fl; spread = sn} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   in
@@ -359,10 +359,10 @@ let book_idx = ref 0
 
 let current_book () = (!books).(!book_idx)
 
-let max_index ?(book = current_book()) () = book.max_loc
+let max_index ?(book = current_book()) () = last_idx book.last_page.spread
 
 let within_book_range ?(book=current_book()) x = 
-  x >= 0 && x <= book.max_loc
+  x >= 0 && x <= max_index ~book ()
 
 let book_count () = Array.length !books
 
@@ -533,14 +533,22 @@ let rec new_pos (pos,book_i) =
   end
 *)
 
-let next_page n = n.next
-let prev_page n = n.prev
-let first_page n = n.book.first_page
-let last_page n = n.book.last_page
+let next_page () = cur_node := !cur_node.next
+let prev_page () = cur_node := !cur_node.prev
+let first_page () = cur_node := !cur_node.book.first_page
+let last_page () = cur_node := !cur_node.book.last_page
+let find_page i () = 
+  assert (within_book_range i);
+  let p0 = get_pos !cur_node.spread in
+  let not_pg_i n = not (List.mem i n.spread.idxes) in
+  if p0 < i then 
+    while not_pg_i !cur_node do cur_node := !cur_node.next; done
+  else 
+    while not_pg_i !cur_node do cur_node := !cur_node.prev; done
+  
 
-let new_page gen_page () = 
-  cur_node := gen_page !cur_node;
-  show_spread ()
+let new_page set_page () = 
+  set_page (); show_spread ()
     
 (*
 let toggle_twopage () =
