@@ -119,24 +119,21 @@ Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
 	    GdkPixbuf.copy_area ~dest:out_buf ~dest_x:w ~dest_y:dest_y2 p2;
 	    out_buf
 
-  let make pos get_cache = 
-    let pic = get_cache pos in
-    let out_w, out_h  = pixbuf_size pic in
-
-    let next_pic = get_cache (pos+1) in
-    if is_vert pic && opt.twopage && is_vert next_pic then
-      let w1,h1 = pixbuf_size next_pic in
+  let make pos p1 p2 = 
+    let w1,h1 = pixbuf_size p1 
+    and w2,h2 = pixbuf_size p2 in
+    if opt.twopage && h1>w1 && h2>w2 then
       let idxes = if opt.manga then [pos+1;pos] else [pos;pos+1] in
       { pos = pos; idxes = idxes;
-	o_width = out_w + w1; o_height = max out_h h1;
-	pic1 = pic; pic2 = Some next_pic;
-	pixbuf = pic;
+	o_width = w1+w2; o_height = max h1 h2;
+	pic1 = p1; pic2 = Some p2;
+	pixbuf = p1;
 	scaler = None; }
     else 
       { pos = pos; idxes = [pos];
-	o_width = out_w; o_height = out_h;
-	pixbuf = pic;
-	pic1=pic; pic2=None;
+	o_width = w1; o_height = h1;
+	pixbuf = p1;
+	pic1=p1; pic2=None;
 	scaler = None; }
       
   let scale disp_pos ?post_scale size spread =
@@ -401,7 +398,9 @@ let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocati
 let get_spread ?(book=current_book()) pos = 
   match get_scache ~book pos with
       None -> 
-	let s = Spread.make pos get_cache in
+	let p1 = get_cache pos in
+	let p2 = get_cache (pos + 1) in
+	let s = Spread.make pos p1 p2 in
 	put_scache ~book s;
 	s
     | Some s -> s
