@@ -94,15 +94,7 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
 
 
 (* SPREAD TYPE AND MANIPULATION OF SUCH *)    
-type spread = { orig_size : int * int;
-		idxes: int list;
-		files : string list; 
-	      }
     
-let get_idxes s = s.idxes
-let first_idx s = s.idxes |> List.fold_left min max_int
-let last_idx s = s.idxes |> List.fold_left max min_int
-let get_pos s = first_idx s
   
 let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
   
@@ -112,16 +104,6 @@ let pics_of_idxes get_cache idxes = idxes
 		  
 let is_vert pic = let (w0,h0) = pixbuf_size pic in w0 < h0
 						     
-let make1 pos fl p1 =
-  { idxes = [pos]; files = fl;
-    orig_size = pixbuf_size p1; }
-      
-let make2 pos fl p1 p2= 
-  let w1,h1 = pixbuf_size p1 
-  and w2,h2 = pixbuf_size p2 in
-  { idxes = [pos; pos+1]; files = fl;
-    orig_size = (w1+w2,max h1 h2); }
-      
 let numeric_compare s1 s2 = 
   let l1 = String.length s1 and l2 = String.length s2 in
   let s1 = String.lowercase s1 and s2 = String.lowercase s2 in
@@ -152,11 +134,29 @@ type node = { mutable next : node;
 	      book : book;
 	      mutable pixbuf : GdkPixbuf.pixbuf option;
 	      mutable scaler : Glib.Idle.id option;
-	      spread : spread; }
+	      orig_size : int * int;
+	      idxes: int list;
+	      files : string list; 
+	    }
 and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
-	     mutable more_files : string list; } (* all files not yet made into nodes *)
+	     (* all files not yet made into nodes *)
+	     mutable more_files : string list; 
+	     page_cache : GdkPixbuf.pixbuf Weak.t;
+	   }
+
+let get_page b idx fn =
+  match Weak.get b.page_cache idx with 
+      Some pb -> pb 
+    | None -> let pb = GdkPixbuf.from_file fn in
+      Weak.set b.page_cache idx (Some pb);
+      pb
+    
+let get_idxes s = s.idxes
+let first_idx s = s.idxes |> List.fold_left min max_int
+let last_idx s = s.idxes |> List.fold_left max min_int
+let get_pos s = first_idx s
 
 let fits_size_pb size orig pb = 
   let ar_size = ar_sizer size orig opt.fit in
@@ -164,7 +164,7 @@ let fits_size_pb size orig pb =
 
 let make_size_match size node maker = 
   match node.pixbuf with 
-      Some pb when fits_size_pb size node.spread.orig_size pb -> pb
+      Some pb when fits_size_pb size node.orig_size pb -> pb
     | None | Some _ -> maker size node
 
 let fresh_pixbuf s =
@@ -178,14 +178,14 @@ let fresh_pixbuf s =
     GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width:w ~height:h pb;
     copier (dest_x + w) rest
   in
-  let pics = s.files |> List.map GdkPixbuf.from_file in
+  let pics = List.map2 (get_page s.book) s.idxes s.files in
   let pics = if opt.manga then List.rev pics else pics in
   copier 0 pics;
   out_buf
     
 let best_scale size node = 
-  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" node.spread.idxes);
-  let big_pb = fresh_pixbuf node.spread in
+  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" node.idxes);
+  let big_pb = fresh_pixbuf node in
   scale_ar size ~interp:`HYPER big_pb
 
 let scale ?post_scale size node =
@@ -207,15 +207,19 @@ let scale ?post_scale size node =
 
 let gen_page b () = 
   let page1 f p = 
-    let pos_n = (last_idx b.last_page.spread + 1) in
-    let sn = make1 pos_n [f] p in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn; pixbuf = None; scaler = None} in
+    let pos_n = (last_idx b.last_page + 1) in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; 
+	      pixbuf = None; scaler = None; 
+	     idxes = [pos_n]; files=[f]; orig_size = pixbuf_size p;} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   and page2 fl p1 p2 =
-    let pos_n = (last_idx b.last_page.spread + 1) in
-    let sn = make2 pos_n fl p1 p2 in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn; pixbuf = None; scaler = None} in
+    let pos_n = (last_idx b.last_page + 1) in
+    let w1,h1 = pixbuf_size p1 
+    and w2,h2 = pixbuf_size p2 in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; 
+	      pixbuf = None; scaler = None; idxes = [pos_n; pos_n+1];
+	     files = fl; orig_size = (w1+w2,max h1 h2);} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   in
@@ -237,13 +241,16 @@ let gen_page b () =
 
 let make_book title files = 
   let files = files |> Array.of_list in
+  let len = Array.length files in
   Array.sort numeric_compare files; (* TODO: schwarzian transform *)
   let files = files |> Array.to_list in
   match files with [] -> None 
     | p0 :: rest -> 
-	let s0 = make1 0 [p0] (GdkPixbuf.from_file p0) in
-	let rec n = {next=n; prev=n; book=b; spread=s0;pixbuf=None;scaler=None}
-	and b = {title=title; more_files=rest; first_page=n; last_page=n; } in
+	let rec n = {next = n; prev = n; book = b; pixbuf = None;
+		     scaler = None; idxes = [0]; files = [p0]; 
+		     orig_size = pixbuf_size (GdkPixbuf.from_file p0);}
+	and b = {title=title; more_files=rest; first_page=n; last_page=n; 
+		page_cache = Weak.create len} in
 	Some b
 
 
@@ -266,7 +273,7 @@ let is_archive fn = any_suffix archive_suffixes fn
 let is_picture fn = any_suffix pic_suffixes fn
 
 let extract_archive file dir =
-  Printf.eprintf "Extracting %s to %s\n" file dir;
+  Printf.eprintf "Extracting %s to %s\n" file dir; flush stderr;
   match archive_type file with
     | `Rar -> Sys.command (Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir)
     | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
@@ -344,15 +351,15 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
       
 let cur_node = ref (Obj.magic 0)
 
-let idxes_on_disp () = !cur_node.spread.idxes
+let idxes_on_disp () = !cur_node.idxes
 
-let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page.spread
+let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
 
 let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
 
 let display pic n = 
   image1#set_pixbuf pic;
-  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.spread.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
+  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
   (* draw the screen *)
   ignore (Glib.Main.iteration true)
 
@@ -360,7 +367,7 @@ let display pic n =
 let quick_scale size node = 
   (* queue the good rescale *)
   scale ~post_scale:display (view_size ()) !cur_node;  
-  let big_pb = fresh_pixbuf node.spread in
+  let big_pb = fresh_pixbuf node in
   scale_ar size big_pb
 
 
@@ -419,8 +426,8 @@ let first_page () = cur_node := !cur_node.book.first_page
 let last_page () = cur_node := !cur_node.book.last_page
 let find_page i () = 
   assert (within_book_range i);
-  let p0 = get_pos !cur_node.spread in
-  let not_pg_i n = not (List.mem i n.spread.idxes) in
+  let p0 = get_pos !cur_node in
+  let not_pg_i n = not (List.mem i n.idxes) in
   if p0 < i then 
     while not_pg_i !cur_node do cur_node := !cur_node.next; done
   else 
@@ -460,7 +467,7 @@ let go_to_page_dialog () =
   let w = GWindow.dialog ~parent:window ~title:"Go to page" ~modal:true ~position:`CENTER () in
   ignore (GMisc.label ~text:"Page: " ~packing:w#vbox#add ());
   let sb = GEdit.spin_button ~packing:w#vbox#add ~digits:0 ~numeric:true () in
-  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float (get_pos !cur_node.spread)); (*sb#set_activates_default true;*)
+  sb#adjustment#set_bounds ~lower:0. ~upper:(float (max_index ())) ~step_incr:1. (); sb#set_value (float (get_pos !cur_node)); (*sb#set_activates_default true;*)
 
   let entry = new GEdit.entry (GtkEdit.Entry.cast sb#as_widget) in
   entry#set_activates_default true;
