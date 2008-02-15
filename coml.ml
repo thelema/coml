@@ -185,8 +185,7 @@ let fresh_pixbuf s =
     
 let best_scale size node = 
   Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" node.idxes);
-  let big_pb = fresh_pixbuf node in
-  scale_ar size ~interp:`HYPER big_pb
+  scale_ar size ~interp:`HYPER (fresh_pixbuf node)
 
 let scale ?post_scale size node =
   let scale_idle () =
@@ -231,11 +230,10 @@ let gen_page b () =
 	  match b.more_files with 
 	      [] -> page1 f1 p1
 	    | f2 :: rest -> 
-		b.more_files <- rest; 
 		let p2 = GdkPixbuf.from_file f2 in
 		if is_vert p2 
-		then page2 [f1; f2] p1 p2
-		else (ignore(page1 f1 p1); page1 f2 p2)
+		then (b.more_files <- rest; page2 [f1; f2] p1 p2)
+		else page1 f1 p1
 	else 
 	  page1 f1 p1
 
@@ -255,7 +253,12 @@ let make_book title files =
 
 
 let books = ref [| |]
+let cur_node = ref (Obj.magic 0)
+let idxes_on_disp () = !cur_node.idxes
+let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
+let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
 
+let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -349,14 +352,6 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
  
 
       
-let cur_node = ref (Obj.magic 0)
-
-let idxes_on_disp () = !cur_node.idxes
-
-let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
-
-let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
-
 let display pic n = 
   image1#set_pixbuf pic;
   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
@@ -367,58 +362,23 @@ let display pic n =
 let quick_scale size node = 
   (* queue the good rescale *)
   scale ~post_scale:display (view_size ()) !cur_node;  
-  let big_pb = fresh_pixbuf node in
-  scale_ar size big_pb
+  scale_ar size (fresh_pixbuf node)
 
+let unit_task prio f = 
+  let tid = ref None in
+  let task () = tid := None; f (); false in
+  fun () -> if !tid = None then tid := Some (Idle.add ~prio:prio task)
 
-let preload_spread = 
-  let preload_taskid = ref None in
-  let preload_task () = 
-    preload_taskid := None;
-    scale (view_size ()) !cur_node.next;
-    false
-  in
-  fun () -> 
-    if !preload_taskid = None then
-      preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
+let preload_spread = unit_task preload_prio 
+  (fun () -> scale (view_size ()) !cur_node.next)
 
-let show_spread = 
-  let show_taskid = ref None in
-  let cur_spread_task () =
-    show_taskid := None;
-    let size = view_size () in
-    let pic = make_size_match size !cur_node quick_scale in
-    display pic !cur_node;
+let show_spread = unit_task show_prio 
+  (fun () -> 
+     let size = view_size () in
+     let pic = make_size_match size !cur_node quick_scale in
+     display pic !cur_node;
+     preload_spread (); )
 
-    preload_spread ();
-    false
-  in
-  fun () -> 
-    if !show_taskid = None then 
-      show_taskid := Some (Idle.add ~prio:show_prio cur_spread_task)
-
-
-(*
-let rec new_pos (pos,book_i) =
-  let b0 = 0 and bmax = Array.length !books - 1 in
-  let book_i = min bmax (max b0 book_i) in
-  let p0 = 0 and pmax = max_index ~book:!books.(book_i) () in
-  if pos < p0 then new_pos 
-    (if book_i > b0 then max_int,book_i -1
-     else if opt.wrap then max_int,bmax else 0,book_i)
-  else if pos > pmax then new_pos 
-    ( if pos = max_int then pmax,book_i 
-      else if book_i < bmax then 0,book_i + 1
-      else if opt.wrap then 0,0 else pmax,book_i)
-  else begin
-    if pos = 0 then set_status 
-      (if book_i = 0 then "At beginning of Library" else "At beginning of book")
-    else 
-      if pos = max_index () then set_status 
-	(if book_i = bmax then "At end of Library" else "At end of book");
-    show_spread ~pos:(pos,book_i) ()
-  end
-*)
 
 let next_page () = cur_node := !cur_node.next
 let prev_page () = cur_node := !cur_node.prev
@@ -535,7 +495,7 @@ let main () =
   (* If no args, assume "." as argument *)
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
   build_books arg_list;
-  Printf.eprintf "Books built %d" (Array.length !books); flush stderr;
+  Printf.eprintf "Books built %d\n" (Array.length !books); flush stderr;
   if Array.length !books = 0 then begin
     Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
     exit 1
