@@ -94,92 +94,34 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
 
 
 (* SPREAD TYPE AND MANIPULATION OF SUCH *)    
-type spread = { pic1: GdkPixbuf.pixbuf; 
-		pic2: GdkPixbuf.pixbuf option; 
-		o_width : int; o_height: int;
+type spread = { orig_size : int * int;
 		idxes: int list;
 		files : string list; 
-		mutable pixbuf: GdkPixbuf.pixbuf; 
-		mutable scaler : Glib.Idle.id option;
 	      }
     
-(*  let null = { pic1 = failed_load; pic2 = None; pixbuf = failed_load; idxes = []; scaler=None; o_width = 1; o_height = 1; }*)
-
-  let get_idxes s = s.idxes
-  let first_idx s = s.idxes |> List.fold_left min max_int
-  let last_idx s = s.idxes |> List.fold_left max min_int
-  let get_pos s = first_idx s
-    
-  let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
-    
-  let fits_size size s =
-    let ar_size = ar_sizer size (s.o_width,s.o_height) opt.fit in
-    size_fits (pixbuf_size s.pixbuf) ar_size
-
-  let pics_of_idxes get_cache idxes = idxes
-	   |> List.map get_cache 
-	   |> List.filter (fun p -> p != failed_load) 
-
-  let is_vert pic = let (w0,h0) = pixbuf_size pic in w0 < h0
-
-
-  let freshen_pixbuf s =
-    s.pixbuf <- 
-      match s.pic2 with 
-	  None -> s.pic1
-	| Some p2 -> 
-	    let p1,p2 = if opt.manga then p2,s.pic1 else s.pic1,p2 in
-	    let w,h = pixbuf_size p1 in
-	    let dest_y1 = (s.o_height - h) / 2 in
-(*Printf.eprintf "w:%d h:%d dy1: %d\n" w h dest_y1;*)
-	    let w2,h2 = pixbuf_size p2 in
-	    let dest_y2 = (s.o_height - h2) / 2 in
-(*Printf.eprintf "w2:%d h2:%d dy2: %d\n" w2 h2 dest_y2;
-
-Printf.eprintf "ob: %d x %d\n" s.o_width s.o_height; *)
-	    let out_buf = GdkPixbuf.create ~width:s.o_width ~height:s.o_height ~has_alpha:true () in
-	    GdkPixbuf.fill out_buf (0x00000000l);
-	    GdkPixbuf.copy_area ~dest:out_buf ~dest_x:0 ~dest_y:dest_y1 p1;
-	    GdkPixbuf.copy_area ~dest:out_buf ~dest_x:w ~dest_y:dest_y2 p2;
-	    out_buf
-
-  let make1 pos fl p1 = 
-    let w1,h1 = pixbuf_size p1 in
-    { idxes = [pos]; files = fl;
-      o_width = w1; o_height = h1;
-      pixbuf = p1;
-      pic1=p1; pic2=None;
-      scaler = None; }
+let get_idxes s = s.idxes
+let first_idx s = s.idxes |> List.fold_left min max_int
+let last_idx s = s.idxes |> List.fold_left max min_int
+let get_pos s = first_idx s
+  
+let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
+  
+let pics_of_idxes get_cache idxes = idxes
+	      |> List.map get_cache 
+	      |> List.filter (fun p -> p != failed_load) 
+		  
+let is_vert pic = let (w0,h0) = pixbuf_size pic in w0 < h0
+						     
+let make1 pos fl p1 =
+  { idxes = [pos]; files = fl;
+    orig_size = pixbuf_size p1; }
       
-  let make2 pos fl p1 p2= 
-    let w1,h1 = pixbuf_size p1 
-    and w2,h2 = pixbuf_size p2 in
-    { idxes = [pos; pos+1]; files = fl;
-      o_width = w1+w2; o_height = max h1 h2;
-      pic1 = p1; pic2 = Some p2;
-      pixbuf = p1;
-      scaler = None; }
+let make2 pos fl p1 p2= 
+  let w1,h1 = pixbuf_size p1 
+  and w2,h2 = pixbuf_size p2 in
+  { idxes = [pos; pos+1]; files = fl;
+    orig_size = (w1+w2,max h1 h2); }
       
-  let scale ?post_scale size spread =
-    let scale_idle () =
-      spread.scaler <- None; 
-(*      let pos = get_pos spread in
-      if !disp_pos >= pos && !disp_pos < pos + 4 then begin (* don't bother scaling if far away from current position *)*)
-	if not (fits_size size spread) then begin
-	  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" spread.idxes);
-	  freshen_pixbuf spread;
-	  spread.pixbuf <- scale_ar size ~interp:`HYPER spread.pixbuf;
-	end;
-	(match post_scale with None -> () | Some f -> f spread);
-(*      end;*)
-      false
-    in
-    (match spread.scaler with 
-	 None -> ()
-       | Some tid -> Idle.remove tid);
-    spread.scaler <- 
-      Some (Idle.add ~prio:scale_prio scale_idle)
-
 let numeric_compare s1 s2 = 
   let l1 = String.length s1 and l2 = String.length s2 in
   let s1 = String.lowercase s1 and s2 = String.lowercase s2 in
@@ -208,24 +150,72 @@ let numeric_compare s1 s2 =
 type node = { mutable next : node; 
 	      mutable prev: node;
 	      book : book;
+	      mutable pixbuf : GdkPixbuf.pixbuf option;
+	      mutable scaler : Glib.Idle.id option;
 	      spread : spread; }
 and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
-	     mutable more_files : string list; (* all files not yet made into nodes *)
-	   }
+	     mutable more_files : string list; } (* all files not yet made into nodes *)
+
+let fits_size_pb size orig pb = 
+  let ar_size = ar_sizer size orig opt.fit in
+  size_fits (pixbuf_size pb) ar_size
+
+let make_size_match size node maker = 
+  match node.pixbuf with 
+      Some pb when fits_size_pb size node.spread.orig_size pb -> pb
+    | None | Some _ -> maker size node
+
+let fresh_pixbuf s =
+  let ow,oh = s.orig_size in
+  let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
+  GdkPixbuf.fill out_buf (0x00000000l);
+  
+  let rec copier dest_x = function [] -> () | pb::rest ->
+    let (w, h) = pixbuf_size pb in
+    let dest_y = (oh - h) / 2 in
+    GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width:w ~height:h pb;
+    copier (dest_x + w) rest
+  in
+  let pics = s.files |> List.map GdkPixbuf.from_file in
+  let pics = if opt.manga then List.rev pics else pics in
+  copier 0 pics;
+  out_buf
+    
+let best_scale size node = 
+  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" node.spread.idxes);
+  let big_pb = fresh_pixbuf node.spread in
+  scale_ar size ~interp:`HYPER big_pb
+
+let scale ?post_scale size node =
+  let scale_idle () =
+    node.scaler <- None; 
+    (*      let pos = get_pos spread in
+	    if !disp_pos >= pos && !disp_pos < pos + 4 then begin (* don't bother scaling if far away from current position *)*)
+    
+    let pb = make_size_match size node best_scale in
+    node.pixbuf <- Some pb;
+    (match post_scale with None -> () | Some f -> f pb node);
+    false
+  in
+  (match node.scaler with 
+       None -> ()
+     | Some tid -> Idle.remove tid);
+  node.scaler <- 
+    Some (Idle.add ~prio:scale_prio scale_idle)
 
 let gen_page b () = 
   let page1 f p = 
     let pos_n = (last_idx b.last_page.spread + 1) in
     let sn = make1 pos_n [f] p in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn} in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn; pixbuf = None; scaler = None} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   and page2 fl p1 p2 =
     let pos_n = (last_idx b.last_page.spread + 1) in
     let sn = make2 pos_n fl p1 p2 in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn} in
+    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; spread = sn; pixbuf = None; scaler = None} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
   in
@@ -252,7 +242,7 @@ let make_book title files =
   match files with [] -> None 
     | p0 :: rest -> 
 	let s0 = make1 0 [p0] (GdkPixbuf.from_file p0) in
-	let rec n = {next=n; prev=n; book=b; spread=s0}
+	let rec n = {next=n; prev=n; book=b; spread=s0;pixbuf=None;scaler=None}
 	and b = {title=title; more_files=rest; first_page=n; last_page=n; } in
 	Some b
 
@@ -340,6 +330,7 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 	group_books acc' rest
   in
   books := l |> expand_list [] |> group_books [] |> Array.of_list;
+(* link the books together *)
   let last = Array.length !books - 1 in
   for i = 1 to last do
     !books.(i-1).last_page.next <- !books.(i).first_page;
@@ -359,39 +350,39 @@ let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page.spread
 
 let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
 
-let display s = 
-  let size = view_size () in
-  let pic = 
-    if fits_size size s 
-    then s.pixbuf
-    else scale_ar size s.pixbuf
-  in
+let display pic n = 
   image1#set_pixbuf pic;
-  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (s.idxes |> string_of_int_list "") (max_index ()) !cur_node.book.title)
+  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.spread.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
+  (* draw the screen *)
+  ignore (Glib.Main.iteration true)
+
+
+let quick_scale size node = 
+  (* queue the good rescale *)
+  scale ~post_scale:display (view_size ()) !cur_node;  
+  let big_pb = fresh_pixbuf node.spread in
+  scale_ar size big_pb
+
 
 let preload_spread = 
   let preload_taskid = ref None in
   let preload_task () = 
     preload_taskid := None;
-    scale (view_size ()) !cur_node.next.spread;
+    scale (view_size ()) !cur_node.next;
     false
   in
   fun () -> 
     if !preload_taskid = None then
       preload_taskid := Some (Idle.add ~prio:preload_prio preload_task)
 
-
-
 let show_spread = 
   let show_taskid = ref None in
   let cur_spread_task () =
     show_taskid := None;
-    let spread = !cur_node.spread in
-    scale ~post_scale:display (view_size ()) spread;
-    display spread;
+    let size = view_size () in
+    let pic = make_size_match size !cur_node quick_scale in
+    display pic !cur_node;
 
-    (* draw the screen *)
-    ignore (Glib.Main.iteration true);
     preload_spread ();
     false
   in
@@ -465,8 +456,6 @@ let toggle_manga () =
   opt.manga <- not opt.manga;
   show_spread()
 
-(* FIX new_pos 
-
 let go_to_page_dialog () =
   let w = GWindow.dialog ~parent:window ~title:"Go to page" ~modal:true ~position:`CENTER () in
   ignore (GMisc.label ~text:"Page: " ~packing:w#vbox#add ());
@@ -479,11 +468,10 @@ let go_to_page_dialog () =
   w#add_button_stock `OK `OK;
   w#add_button_stock `CANCEL `CANCEL;
   w#set_default_response `OK;
-  let on_ok () = new_pos (sb#value_as_int,!book_idx); w#destroy () in
+  let on_ok () = new_page (find_page sb#value_as_int) (); w#destroy () in
   match w#run () with
     | `DELETE_EVENT | `CANCEL -> w#destroy ()
     | `OK -> on_ok ()
-*)
 
 let zoom ar_val ar_func = 
   opt.fit <-( match opt.fit with
@@ -511,7 +499,7 @@ let actions = [(_q, Main.quit);
 (*	    (_l, (fun () -> load_cache (List.fold_left min 0 !image_idxes)));*)
 (*	    (_w, (fun () -> opt.wrap <- not opt.wrap));*)
 	    (_Page_Up, new_page first_page); (_Page_Down, new_page last_page);
-(*	    (_g, go_to_page_dialog);*)
+	    (_g, go_to_page_dialog);
 	    (_o, (fun () -> ignore (idxes_on_disp ())));
 	   ]
 
