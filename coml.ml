@@ -494,11 +494,11 @@ let main () =
 	exit 1
     | Some (n0,nx) -> 
 	new_page (fun () -> cur_node := n0) ();
-	let rec preload_book n = 
-	  ignore(Idle.add ~prio:gen_page_prio (gen_page n.book));
-	  if n != nx then preload_book n.next
+	let rec preload_book n i = 
+	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_page n.book));
+	  if n != nx then preload_book n.next (succ i)
 	in
-	preload_book n0
+	preload_book n0 0
   end;
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
