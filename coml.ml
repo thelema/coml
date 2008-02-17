@@ -26,12 +26,18 @@ type options = { mutable fullscreen: bool;
 		 mutable remove_failed: bool; 
 		 mutable fit: scaling;
 		 mutable zoom_enlarge: bool;
+		 mutable wrap : bool;
 	       }
 (* TODO: save and load options *)
-let opt = { fullscreen = false; 
-	    twopage = true; manga = true;
-	    remove_failed = true; fit = Fit_both; zoom_enlarge = false;
-	  }
+let opt = { 
+  fullscreen = false; 
+  twopage = true; 
+  manga = true;
+  remove_failed = true; 
+  fit = Fit_both; 
+  zoom_enlarge = false;
+  wrap = false;
+}
 
 
 (* GTK WIDGETS *)
@@ -237,22 +243,29 @@ let gen_page b () =
 	else 
 	  page1 f1 p1
 
-let make_book title files = 
+let make_book lib title files = 
   let files = files |> Array.of_list in
   let len = Array.length files in
   Array.sort numeric_compare files; (* TODO: schwarzian transform *)
   let files = files |> Array.to_list in
-  match files with [] -> None 
+  match files with [] -> lib
     | p0 :: rest -> 
 	let rec n = {next = n; prev = n; book = b; pixbuf = None;
 		     scaler = None; idxes = [0]; files = [p0]; 
 		     orig_size = pixbuf_size (GdkPixbuf.from_file p0);}
-	and b = {title=title; more_files=rest; first_page=n; last_page=n; 
-		page_cache = Weak.create len} in
-	Some b
+	and b = {title=title; more_files=rest; 
+		 first_page=n; last_page=n; 
+		 page_cache = Weak.create len} in
+	Printf.eprintf "Making book %s with %d files\n" title len;
+	match lib with
+	    None -> 
+	      Some (n,n)
+	  | Some (n0,nx) ->
+	      n.prev <- nx; 
+	      nx.next <- n;
+	      if opt.wrap then (n.next <- n0; n0.prev <- n );
+	      Some (n0,n)
 
-
-let books = ref [| |]
 let cur_node = ref (Obj.magic 0)
 let idxes_on_disp () = !cur_node.idxes
 let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
@@ -261,7 +274,7 @@ let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
 let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
-let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
+let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
 
 let fold_sufchecks fn set_acc init suf_list = 
   let folder acc (s, tag) =
@@ -294,16 +307,17 @@ let rec rec_del path =
 
 let build_books l = 
   let files_in path = assert (is_directory path); Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
-  let rec expand_list acc = function
-      [] -> acc
-    | h :: t when not (Sys.file_exists h) -> expand_list acc t
-    | h :: t when is_directory h ->
+  let ht = Hashtbl.create 50 in (* title -> filename  -- multiple bindings *)
+  let titles = ref [] in (* title -> unit -- single-binding per title *)
+  let add_entries t fs = List.iter (Hashtbl.add ht t) fs; if not (List.mem t !titles) then titles := !titles @ [t] in
+  let rec expand_list = function
+    | h when not (Sys.file_exists h) -> ()
+    | h when is_directory h ->
 	let hlen = String.length h in
 	let h = if h.[hlen-1] = '/' then String.sub h 0 (hlen-1) else h in
 	let title = Filename.basename h in
-	let book = files_in h |> List.map (fun fn -> title,fn) in
-	expand_list (List.rev_append book acc) t
-    | h :: t when is_archive h ->
+	files_in h |> List.filter is_picture |> add_entries title;
+    | h when is_archive h ->
       let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
       (* extract archive to td *)
       let return_code = extract_archive h td in
@@ -319,39 +333,18 @@ Printf.eprintf "Dirs:\n";
 List.iter (Printf.eprintf "%s\n") dirs;
 Printf.eprintf "Contents:\n";
 List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
-	let acc' = files |> List.map (fun fn -> title,fn) |> List.append acc
-	and t' = List.rev_append dirs t in
-	  expand_list acc' t'
-      else 
-	expand_list acc t
-    | h :: t when is_picture h ->
-	expand_list ((Filename.basename h,h)::acc) t
-    | _ :: t -> (* garbage file *)
-	expand_list acc t
-  and group_books acc = function
-      [] -> acc
-    | (n1,p1)::t as l ->
-	let b1,rest = List.partition (fun (n,_) -> n = n1) l in
-	let files = b1|> List.rev_map snd|> List.filter is_picture in
-	let acc' = 
-	  match make_book n1 files with
-	      None -> acc
-	    | Some b -> b :: acc in
-	group_books acc' rest
+	files |> List.filter is_picture |> add_entries title;
+	List.iter expand_list dirs;
+    | h when is_picture h ->
+	add_entries (Filename.basename h) [h];
+    | _ -> (* garbage file *) ()
   in
-  books := l |> expand_list [] |> group_books [] |> Array.of_list;
-(* link the books together *)
-  let last = Array.length !books - 1 in
-  for i = 1 to last do
-    !books.(i-1).last_page.next <- !books.(i).first_page;
-    !books.(i).first_page.prev <- !books.(i-1).last_page;
-  done;
-  !books.(last).last_page.next <- !books.(0).first_page;
-  !books.(0).first_page.prev <- !books.(last).last_page
+  List.iter expand_list l; (* stores results in hashtables ht & titles *)
+
+  let add_book l t = make_book l t (Hashtbl.find_all ht t) in
+  List.fold_left add_book None !titles
 ;;
  
-
-      
 let display pic n = 
   image1#set_pixbuf pic;
   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
@@ -464,7 +457,7 @@ let actions = [(_q, Main.quit);
 	    (_m, toggle_manga); (_z, toggle_zoom);
 	    (_minus, zoom_out); (_plus, zoom_in);
 (*	    (_l, (fun () -> load_cache (List.fold_left min 0 !image_idxes)));*)
-(*	    (_w, (fun () -> opt.wrap <- not opt.wrap));*)
+	    (_w, (fun () -> opt.wrap <- not opt.wrap));
 	    (_Page_Up, new_page first_page); (_Page_Down, new_page last_page);
 	    (_g, go_to_page_dialog);
 	    (_o, (fun () -> ignore (idxes_on_disp ())));
@@ -494,13 +487,19 @@ let main () =
   let arg_list = Sys.argv |> Array.to_list |> List.tl in
   (* If no args, assume "." as argument *)
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
-  build_books arg_list;
-  Printf.eprintf "Books built %d\n" (Array.length !books); flush stderr;
-  if Array.length !books = 0 then begin
-    Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
-    exit 1
+  
+  begin match build_books arg_list with
+      None -> 
+	Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
+	exit 1
+    | Some (n0,nx) -> 
+	new_page (fun () -> cur_node := n0) ();
+	let rec preload_book n = 
+	  ignore(Idle.add ~prio:gen_page_prio (gen_page n.book));
+	  if n != nx then preload_book n.next
+	in
+	preload_book n0
   end;
-
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
   and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
@@ -514,9 +513,7 @@ let main () =
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
   
-  new_page (fun () -> cur_node := !books.(0).first_page) ();
   window#show ();
-  Array.iteri (fun i b -> ignore(Idle.add ~prio:(gen_page_prio+i) (gen_page b))) !books;
   Main.main () (* calls the GTK main event loop *)
     
 let _ = main ()
