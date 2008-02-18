@@ -65,7 +65,9 @@ let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; no
 let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
 
 
-let preload_prio = 150 and show_prio = 115 and scale_prio = 200 and gen_page_prio = 210
+let preload_prio = 130 and show_prio = 115 
+and scale_prio = 140 and gen_page_prio = 150 
+and spread_gc_prio = 145
 
 let failed_load = GdkPixbuf.create 1 1 ()
 
@@ -84,24 +86,20 @@ let scale_raw (width,height) ~interp pixbuf =
 
 let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom)
 
-let ar_sizer t_size p_size fit =
+let find_zoom t_size p_size fit =
   let zoom = 
     match fit with 
 	Fit_w -> fit_wid t_size p_size 
       | Fit_h -> fit_hei t_size p_size 
       | Fit_both -> fit_both t_size p_size 
       | Zoom z -> z in
-  let zoom = if opt.zoom_enlarge then zoom else min zoom 1.0 in
-  mul_size p_size zoom
+  if opt.zoom_enlarge then zoom else min zoom 1.0
 
 let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
-  let ar_size = ar_sizer t_size (pixbuf_size pixbuf) fit in
+  let orig = pixbuf_size pixbuf in
+  let ar_size = mul_size orig (find_zoom t_size orig fit) in
   scale_raw ar_size ~interp pixbuf
 
-
-(* SPREAD TYPE AND MANIPULATION OF SUCH *)    
-    
-  
 let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
   
 let pics_of_idxes get_cache idxes = idxes
@@ -164,69 +162,19 @@ let first_idx s = s.idxes |> List.fold_left min max_int
 let last_idx s = s.idxes |> List.fold_left max min_int
 let get_pos s = first_idx s
 
-let fits_size_pb size orig pb = 
-  let ar_size = ar_sizer size orig opt.fit in
-  size_fits (pixbuf_size pb) ar_size
-
-let make_size_match size node maker = 
-  match node.pixbuf with 
-      Some pb when fits_size_pb size node.orig_size pb -> pb
-    | None | Some _ -> maker size node
-
-let fresh_pixbuf s =
-  let ow,oh = s.orig_size in
-  let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
-  GdkPixbuf.fill out_buf (0x00000000l);
-  
-  let rec copier dest_x = function [] -> () | pb::rest ->
-    let (w, h) = pixbuf_size pb in
-    let dest_y = (oh - h) / 2 in
-    GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width:w ~height:h pb;
-    copier (dest_x + w) rest
-  in
-  let pics = List.map2 (get_page s.book) s.idxes s.files in
-  let pics = if opt.manga then List.rev pics else pics in
-  copier 0 pics;
-  out_buf
-    
-let best_scale size node = 
-  Printf.eprintf "Resizing img (%s)\n" (string_of_int_list "" node.idxes);
-  scale_ar size ~interp:`HYPER (fresh_pixbuf node)
-
-let scale ?post_scale size node =
-  let scale_idle () =
-    node.scaler <- None; 
-    (*      let pos = get_pos spread in
-	    if !disp_pos >= pos && !disp_pos < pos + 4 then begin (* don't bother scaling if far away from current position *)*)
-    
-    let pb = make_size_match size node best_scale in
-    node.pixbuf <- Some pb;
-    (match post_scale with None -> () | Some f -> f pb node);
-    false
-  in
-  (match node.scaler with 
-       None -> ()
-     | Some tid -> Idle.remove tid);
-  node.scaler <- 
-    Some (Idle.add ~prio:scale_prio scale_idle)
-
-let gen_page b () = 
-  let page1 f p = 
+let gen_pages b () = 
+  let page fl i s = 
     let pos_n = (last_idx b.last_page + 1) in
     let n1 = {next = b.last_page.next; prev=b.last_page; book=b; 
 	      pixbuf = None; scaler = None; 
-	     idxes = [pos_n]; files=[f]; orig_size = pixbuf_size p;} in
+	      idxes = i pos_n; files=fl; orig_size = s;} in
     b.last_page.next <- n1; b.last_page <- n1;
     true
-  and page2 fl p1 p2 =
-    let pos_n = (last_idx b.last_page + 1) in
-    let w1,h1 = pixbuf_size p1 
-    and w2,h2 = pixbuf_size p2 in
-    let n1 = {next = b.last_page.next; prev=b.last_page; book=b; 
-	      pixbuf = None; scaler = None; idxes = [pos_n; pos_n+1];
-	     files = fl; orig_size = (w1+w2,max h1 h2);} in
-    b.last_page.next <- n1; b.last_page <- n1;
-    true
+  in
+  let page1 fl p = page fl (fun i -> [i]) (pixbuf_size p)
+  and page2 fl p1 p2 = 
+    let w1,h1 = pixbuf_size p1 and w2,h2 = pixbuf_size p2 in
+    page fl (fun i -> [i;i+1]) (w1+w2,max h1 h2)
   in
   match b.more_files with [] -> false
     | f1 :: rest -> 
@@ -234,14 +182,14 @@ let gen_page b () =
 	let p1 = GdkPixbuf.from_file f1 in
 	if opt.twopage && is_vert p1 then
 	  match b.more_files with 
-	      [] -> page1 f1 p1
+	      [] -> page1 [f1] p1
 	    | f2 :: rest -> 
 		let p2 = GdkPixbuf.from_file f2 in
 		if is_vert p2 
 		then (b.more_files <- rest; page2 [f1; f2] p1 p2)
-		else page1 f1 p1
+		else page1 [f1] p1
 	else 
-	  page1 f1 p1
+	  page1 [f1] p1
 
 let make_book lib title files = 
   let files = files |> Array.of_list in
@@ -266,7 +214,7 @@ let make_book lib title files =
 	      if opt.wrap then (n.next <- n0; n0.prev <- n );
 	      Some (n0,n)
 
-let cur_node = ref (Obj.magic 0)
+let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
 let idxes_on_disp () = !cur_node.idxes
 let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
 let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
@@ -345,52 +293,98 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
   List.fold_left add_book None !titles
 ;;
  
-let display pic n = 
-  image1#set_pixbuf pic;
-  window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title);
-  (* draw the screen *)
-  ignore (Glib.Main.iteration true)
-
-
-let quick_scale size node = 
-  (* queue the good rescale *)
-  scale ~post_scale:display (view_size ()) !cur_node;  
-  scale_ar size (fresh_pixbuf node)
-
-let unit_task prio f = 
+let fresh_pixbuf s =
+  let ow,oh = s.orig_size in
+  let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
+  GdkPixbuf.fill out_buf (0x00000000l);
+  
+  let rec copier dest_x = function [] -> () | pb::rest ->
+    let (w, h) = pixbuf_size pb in
+    let dest_y = (oh - h) / 2 in
+    GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width:w ~height:h pb;
+    copier (dest_x + w) rest
+  in
+  let pics = List.map2 (get_page s.book) s.idxes s.files in
+  let pics = if opt.manga then List.rev pics else pics in
+  copier 0 pics;
+  out_buf
+    
+let singleton_task prio f = 
   let tid = ref None in
   let task () = tid := None; f (); false in
   fun () -> if !tid = None then tid := Some (Idle.add ~prio:prio task)
-
-let preload_spread = unit_task preload_prio 
-  (fun () -> scale (view_size ()) !cur_node.next)
-
-let show_spread = unit_task show_prio 
+    
+let cleanup_task l = singleton_task spread_gc_prio
   (fun () -> 
-     let size = view_size () in
-     let pic = make_size_match size !cur_node quick_scale in
-     display pic !cur_node;
-     preload_spread (); )
+     let l',rem = List.partition near_cur_node !l in
+     List.iter (fun n -> n.pixbuf <- None) rem; l := l'
+  )
+  
+let set_pb = 
+  let l = ref [] in
+  fun n -> l := n :: !l; if List.length !l > 15 then cleanup_task l ()
 
+let set_node_pixbuf size n interp = 
+  let zoom = find_zoom size n.orig_size opt.fit in
+  let ar_size = mul_size n.orig_size zoom in
+  let display pic = 
+    if n == !cur_node then begin
+      image1#set_pixbuf pic;
+      window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title (zoom *. 100.));
+      (* draw the screen *)
+(*      ignore (Glib.Main.iteration true)*)
+    end
+  in
+  match n.pixbuf with 
+      Some pb when size_fits (pixbuf_size pb) ar_size -> display pb
+    | None | Some _ -> 
+	let pb = (scale_raw ar_size ~interp (fresh_pixbuf n)) in
+	n.pixbuf <- Some pb; set_pb n;
+	display pb
 
-let next_page () = cur_node := !cur_node.next
-let prev_page () = cur_node := !cur_node.prev
-let first_page () = cur_node := !cur_node.book.first_page
-let last_page () = cur_node := !cur_node.book.last_page
+let idle_scale node =
+  let scaler () =
+    node.scaler <- None;
+    (* don't bother scaling if far away from current position *)
+    if near_cur_node node then
+      set_node_pixbuf (view_size ()) node `HYPER;
+    false
+  in
+  if node.scaler = None then
+     node.scaler <- Some (Idle.add ~prio:scale_prio scaler)
+
+ let preload_spread = singleton_task preload_prio 
+   (fun () -> idle_scale !cur_node.next)
+
+ let show_spread () = 
+   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (!cur_node.idxes |> string_of_int_list "") (max_index ~cn:!cur_node ()) !cur_node.book.title);
+   singleton_task show_prio 
+   (fun () -> 
+      (* queue the good rescale *)
+      idle_scale !cur_node;
+      (* do quick rescale - takes care of updating the display *)
+      set_node_pixbuf (view_size()) !cur_node `TILES;
+      preload_spread (); 
+   ) ()
+
+(* PAGE CHANGING FUNCIONS *)
+let next_page () = !cur_node.next
+let prev_page () = !cur_node.prev
+let first_page () = !cur_node.book.first_page
+let last_page () = !cur_node.book.last_page
+  
+let new_page get_page () = 
+  cur_node := get_page (); show_spread ()
+    
 let find_page i () = 
   assert (within_book_range i);
-  let p0 = get_pos !cur_node in
   let not_pg_i n = not (List.mem i n.idxes) in
-  if p0 < i then 
-    while not_pg_i !cur_node do cur_node := !cur_node.next; done
-  else 
-    while not_pg_i !cur_node do cur_node := !cur_node.prev; done
-  
+  (* search in correct direction *)
+  let next = if get_pos !cur_node < i then next_page else prev_page in
+  while not_pg_i !cur_node do cur_node := next() done;
+  show_spread ()
 
-let new_page set_page () = 
-  set_page (); show_spread ()
-    
-(*
+(* needs to re-organize all the nodes - disabled at the moment
 let toggle_twopage () =
   opt.twopage <- not opt.twopage;
   clear_spread_cache ();
@@ -428,7 +422,7 @@ let go_to_page_dialog () =
   w#add_button_stock `OK `OK;
   w#add_button_stock `CANCEL `CANCEL;
   w#set_default_response `OK;
-  let on_ok () = new_page (find_page sb#value_as_int) (); w#destroy () in
+  let on_ok () = find_page sb#value_as_int (); w#destroy () in
   match w#run () with
     | `DELETE_EVENT | `CANCEL -> w#destroy ()
     | `OK -> on_ok ()
@@ -443,7 +437,16 @@ let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
 and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Zoom (ar /. 0.95))
 and toggle_zoom () = zoom 1.0 (fun _ -> Fit_both)
 
-
+(* gets set to first and last books when they're built *)
+let first_last = ref None
+let toggle_wrap () = 
+  opt.wrap <- not opt.wrap;
+  match !first_last with 
+      None -> Printf.eprintf "Cannot change wrap\n";
+    | Some (b0,bx) -> 
+	b0.first_page.prev <- if opt.wrap then bx.last_page else b0.first_page;
+	bx.last_page.next <- if opt.wrap then b0.first_page else bx.last_page
+	  
 (* key bindings as a list of pairs  (key, function) *)  
 open GdkKeysyms
 
@@ -455,9 +458,9 @@ let actions = [(_q, Main.quit);
 	    (_f, toggle_fullscreen); (_F11, toggle_fullscreen);
 	    (_Escape, exit_fullscreen); (*(_t, toggle_twopage);*)
 	    (_m, toggle_manga); (_z, toggle_zoom);
-	    (_minus, zoom_out); (_plus, zoom_in);
+	    (_minus, zoom_out); (_plus, zoom_in); (_equal, zoom_in);
 (*	    (_l, (fun () -> load_cache (List.fold_left min 0 !image_idxes)));*)
-	    (_w, (fun () -> opt.wrap <- not opt.wrap));
+	    (_w, toggle_wrap);
 	    (_Page_Up, new_page first_page); (_Page_Down, new_page last_page);
 	    (_g, go_to_page_dialog);
 	    (_o, (fun () -> ignore (idxes_on_disp ())));
@@ -471,6 +474,13 @@ let handle_key event =
       action ();
       true
   with Not_found -> false
+
+let mouse_motion event =
+  if Gdk.Convert.test_modifier `BUTTON1 (GdkEvent.Motion.state event) then
+    (* in process of dragging *)
+    let _ = GdkEvent.Motion.x event and _ = GdkEvent.Motion.y event in
+    ()
+  
     
 (* Callback when main window gets resized *)
 let resized event =
@@ -493,12 +503,13 @@ let main () =
 	Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
 	exit 1
     | Some (n0,nx) -> 
-	new_page (fun () -> cur_node := n0) ();
-	let rec preload_book n i = 
-	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_page n.book));
-	  if n != nx then preload_book n.next (succ i)
+	new_page (fun () -> n0) ();
+	first_last := Some (n0.book,nx.book);
+	let rec load_book_pages n i = 
+	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_pages n.book));
+	  if n != nx then load_book_pages n.next (succ i)
 	in
-	preload_book n0 0
+	load_book_pages n0 0
   end;
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
