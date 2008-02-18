@@ -10,9 +10,7 @@
    
  *)
 
-let opt_default opt def = match opt with Some v -> v | None -> def
 let (|>) x f = f x
-let string_of_int_list prefix list = prefix ^ (list |> List.map string_of_int |> String.concat ",")
 
 let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
    
@@ -102,15 +100,11 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
 
 let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
   
-let pics_of_idxes get_cache idxes = idxes
-	      |> List.map get_cache 
-	      |> List.filter (fun p -> p != failed_load) 
-		  
 let is_vert pic = let (w0,h0) = pixbuf_size pic in w0 < h0
-						     
+
 let numeric_compare s1 s2 = 
-  let l1 = String.length s1 and l2 = String.length s2 in
   let s1 = String.lowercase s1 and s2 = String.lowercase s2 in
+  let l1 = String.length s1 and l2 = String.length s2 in
   let rec pos_diff i = 
     if i = l1 then -2 else if i = l2 then -1
     else if s1.[i] = s2.[i] then pos_diff (i+1) else i
@@ -132,6 +126,7 @@ let numeric_compare s1 s2 =
 (*      Printf.eprintf " %Ld & %Ld\n" n1 n2;*)
       Int64.compare n1 n2
     end
+
 
 type node = { mutable next : node; 
 	      mutable prev: node;
@@ -322,7 +317,7 @@ let cleanup_task l = singleton_task spread_gc_prio
   
 let set_pb = 
   let l = ref [] in
-  fun n -> l := n :: !l; if List.length !l > 15 then cleanup_task l ()
+  fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()
 
 let set_node_pixbuf size n interp = 
   let zoom = find_zoom size n.orig_size opt.fit in
@@ -330,16 +325,16 @@ let set_node_pixbuf size n interp =
   let display pic = 
     if n == !cur_node then begin
       image1#set_pixbuf pic;
-      window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (n.idxes |> string_of_int_list "") (max_index ~cn:n ()) n.book.title (zoom *. 100.));
+      window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (n.idxes |> String.of_list string_of_int) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
       (* draw the screen *)
-(*      ignore (Glib.Main.iteration true)*)
+      ignore (Glib.Main.iteration true)
     end
   in
   match n.pixbuf with 
       Some pb when size_fits (pixbuf_size pb) ar_size -> display pb
     | None | Some _ -> 
 	let pb = (scale_raw ar_size ~interp (fresh_pixbuf n)) in
-	n.pixbuf <- Some pb; set_pb n;
+	set_pb n pb;
 	display pb
 
 let idle_scale node =
@@ -357,7 +352,7 @@ let idle_scale node =
    (fun () -> idle_scale !cur_node.next)
 
  let show_spread () = 
-   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (!cur_node.idxes |> string_of_int_list "") (max_index ~cn:!cur_node ()) !cur_node.book.title);
+   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (!cur_node.idxes |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
    singleton_task show_prio 
    (fun () -> 
       (* queue the good rescale *)
