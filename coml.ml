@@ -48,7 +48,7 @@ let pane = GPack.paned `VERTICAL ~packing:window#add ()
 
  let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
  let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
- let image1 = GMisc.image ~packing:scroller#add_with_viewport ()
+ let image = GMisc.image ~packing:scroller#add_with_viewport ()
 
  let footer = GPack.hbox ~packing:pane#pack2 ()
   let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
@@ -127,12 +127,14 @@ let numeric_compare s1 s2 =
 
 type ifs = {idx : int; filename: string; size: int * int}
 
+type spread = One of ifs | Two of ifs * ifs
+
 type node = { mutable next : node; 
 	      mutable prev: node;
 	      book : book;
 	      mutable pixbuf : GdkPixbuf.pixbuf option;
 	      mutable scaler : Glib.Idle.id option;
-	      mutable pics : ifs list; 
+	      mutable pics : spread; 
 	    }
 and book = { title: string;
 	     mutable first_page : node; 
@@ -150,13 +152,12 @@ let get_page b idx fn =
       pb
 let get_page_ifs b ifs = get_page b ifs.idx ifs.filename    
 
-let get_idxes s = s.pics |> List.map (fun ifs -> ifs.idx)
-let first_idx s = s |> get_idxes |> List.fold_left min max_int
-let last_idx s = s |> get_idxes |> List.fold_left max min_int
+let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
+let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
+let last_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> max i1.idx i2.idx
 let get_pos s = first_idx s
-let get_size s = 
-  let merge_size (w1,h1) (w2,h2) = (w1 + w2, max h1 h2) in
-  s.pics |> List.fold_left (fun acc ifs -> merge_size acc ifs.size) (0,0)
+let get_size s = match s.pics with One i -> i.size | Two(i1,i2) -> 
+  let merge_size (w1,h1) (w2,h2) = (w1 + w2, max h1 h2) in merge_size i1.size i2.size
 let is_vert ifs = let w0,h0 = ifs.size in w0 < h0
 let gen_ifs i f = {idx=i;filename=f;size=pixbuf_size (GdkPixbuf.from_file f)}
 
@@ -168,9 +169,7 @@ let add_node_after n ifsl =
   let n1 = {next = n.next; prev=n; book=n.book; 
 	    pixbuf = None; scaler = None; 
 	    pics = ifsl;} in
-  n.next <- n1
-
-let del_node n = n.next.prev <- n.prev; n.prev.next <- n.next
+  n.next <- n1; n1.next.prev <- n1
 
 let gen_pages b () = 
   let page ifsl = 
@@ -185,14 +184,14 @@ let gen_pages b () =
 	let ifs1 = gen_ifs_cache b pos_n f1 in
 	if opt.twopage && is_vert ifs1 then
 	  match b.more_files with 
-	      [] -> page [ifs1]
+	      [] -> page (One ifs1)
 	    | f2 :: rest -> 
 		let ifs2 = gen_ifs_cache b (pos_n+1) f2 in
 		if is_vert ifs2 
-		then (b.more_files <- rest; page [ifs1;ifs2])
-		else page [ifs1]
+		then (b.more_files <- rest; page (Two (ifs1,ifs2)))
+		else page (One ifs1)
 	else 
-	  page [ifs1]
+	  page (One ifs1)
 
 let make_book lib title files = 
   let files = files |> Array.of_list in
@@ -202,7 +201,7 @@ let make_book lib title files =
   match files with [] -> lib
     | p0 :: rest -> 
 	let rec n = {next = n; prev = n; book = b; pixbuf = None;
-		     scaler = None; pics = [gen_ifs 0 p0];}
+		     scaler = None; pics = One(gen_ifs 0 p0);}
 	and b = {title=title; more_files=rest; 
 		 first_page=n; last_page=n; 
 		 page_cache = Weak.create len} in
@@ -246,17 +245,18 @@ let extract_archive file dir =
     | `Sev_zip -> Sys.command (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
 
-let rec rec_del path = 
+let rec rec_del fn path = 
+  Printf.eprintf "Cleaning up %s (from archive %s)" path fn;
   let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
   Sys.readdir path
     |> Array.map (fun fn -> Filename.concat path fn)
     |> Array.iter (fun fn -> if is_directory fn
-		   then rec_del fn
+		   then rec_del "" fn 
 		   else remove fn);
     Unix.rmdir path
 
 let build_books l = 
-  let files_in path = assert (is_directory path); Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
+  let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
   let ht = Hashtbl.create 50 in (* title -> filename  -- multiple bindings *)
   let titles = ref [] in (* title -> unit -- single-binding per title *)
   let add_entries t fs = List.iter (Hashtbl.add ht t) fs; if not (List.mem t !titles) then titles := !titles @ [t] in
@@ -272,7 +272,7 @@ let build_books l =
       (* extract archive to td *)
       let return_code = extract_archive h td in
       (* on quit, remove the extracted archive *)
-      at_exit (fun () -> rec_del td);
+      at_exit (fun () -> rec_del h td);
       if return_code = 0 && Sys.file_exists td then
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
@@ -296,20 +296,23 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 ;;
  
 let fresh_pixbuf s =
-  let ow,oh = get_size s in
-  let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
-  GdkPixbuf.fill out_buf (0x00000000l);
+  match s.pics with
+      One i -> get_page_ifs s.book i
+    | Two (i1,i2) -> 
+	let ow,oh = get_size s in
+	let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
+	GdkPixbuf.fill out_buf (0x00000000l);
   
-  let rec copier dest_x = function [] -> () | pb::rest ->
-    let (w, h) = pixbuf_size pb in
-    let dest_y = (oh - h) / 2 in
-    GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width:w ~height:h pb;
-    copier (dest_x + w) rest
-  in
-  let pics = s.pics |> List.map (get_page_ifs s.book) in
-  let pics = if opt.manga then List.rev pics else pics in
-  copier 0 pics;
-  out_buf
+	let rec copier dest_x = function [] -> () | pb::rest ->
+	  let (width, height) = pixbuf_size pb in
+	  let dest_y = (oh - height) / 2 in
+	  GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width ~height pb;
+	  copier (dest_x + width) rest
+	in
+	let pics = [get_page_ifs s.book i1; get_page_ifs s.book i2] in
+	let pics = if opt.manga then List.rev pics else pics in
+	copier 0 pics;
+	out_buf
     
 let singleton_task prio f = 
   let tid = ref None in
@@ -326,15 +329,31 @@ let set_pb =
   let l = ref [] in
   fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()
 
+let print_scrollers adj1 adj2 =
+  Printf.eprintf "scrollers: (%4.0f-%4.0f)@%4.0f PJ: %4.0f \t(%4.0f-%4.0f)@%4.0f PJ %4.0f\n" adj1#lower adj1#upper adj1#value adj1#page_size adj2#lower adj2#upper adj2#value adj2#page_size; flush stderr
+
+let epsilon = 0.00001
+
 let set_node_pixbuf size n interp = 
   let zoom = find_zoom size (get_size n) opt.fit in
   let ar_size = mul_size (get_size n) zoom in
   let display pic = 
     if n == !cur_node then begin
-      image1#set_pixbuf pic;
+      image#set_pixbuf pic;
       window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (get_idxes n |> String.of_list string_of_int) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
       (* draw the screen *)
-      ignore (Glib.Main.iteration true)
+      ignore (Glib.Main.iteration true);
+      let hadj = scroller#hadjustment 
+      and vadj = scroller#vadjustment in
+      print_scrollers hadj vadj;
+      if hadj#value +. hadj#page_size < hadj#upper || vadj#value +. vadj#page_size < vadj#upper then begin
+	vadj#set_value vadj#lower;
+	hadj#set_value (if opt.manga then hadj#upper else hadj#lower);
+      end else begin
+	vadj#set_value vadj#upper;
+	hadj#set_value hadj#upper;
+      end;
+      print_scrollers hadj vadj;
     end
   in
   match n.pixbuf with 
@@ -343,6 +362,9 @@ let set_node_pixbuf size n interp =
 	let pb = (scale_raw ar_size ~interp (fresh_pixbuf n)) in
 	set_pb n pb;
 	display pb
+
+
+
 
 let idle_scale node =
   let scaler () =
@@ -386,26 +408,39 @@ let find_page i () =
   while not_pg_i !cur_node do cur_node := next() done;
   show_spread ()
 
-let merge n = 
-  match n.pics with [] -> del_node n
-    | [i1] when is_vert i1 -> 
-	(match n.next.pics with [] -> del_node n.next
-	   | [i2] -> n.pics <- [i1;i2]; del_node n.next; n.pixbuf <- None;
-	   | [i2;i3] -> n.pics <- [i1;i2]; n.next.pics <- [i3]; n.pixbuf <- None; n.next.pixbuf <- None
-	   | _ -> assert false )
-    | [_] | [_; _] -> () 
-    | _ -> assert false
-and split n = 
-  match n.pics with [] -> del_node n
-      | [i1;i2] -> n.pics <- [i1]; n.pixbuf <- None; add_node_after n [i2];
-      | [_] -> () 
-      | _ -> assert false
 
+(* GROUPING IFSes INTO NODES *)
+let dump_pages b =
+  let n = ref b.first_page in
+  let act n = match n.pics with One i -> Printf.eprintf "(%d)" i.idx | Two (i1,i2) -> Printf.eprintf "[%d,%d]" i1.idx i2.idx in
+  while !n != b.last_page do act !n; n := !n.next done; act !n;
+  Printf.eprintf "\n"
+
+let del_node n = n.next.prev <- n.prev; n.prev.next <- n.next
+
+let merge n = 
+  match n.pics , n.next.pics with 
+    | One i1, _ when not (is_vert i1) -> ()
+    | One i1, One i2 when is_vert i2-> 
+	n.pics <- Two (i1,i2); 
+	if !cur_node == n.next then cur_node := n;
+	del_node n.next; n.pixbuf <- None; 
+    | One i1, Two (i2, i3) -> 
+	n.pics <- Two (i1,i2); n.next.pics <- One i3; 
+	n.pixbuf <- None; n.next.pixbuf <- None
+    | _, One i2 -> ()
+    | Two _, _ -> ()
+and split n = 
+  match n.pics with
+      | Two (i1,i2) -> 
+	  n.pics <- One i1; n.pixbuf <- None; 
+	  add_node_after n (One i2);
+      | One _ -> () 
 
 let regroup_pages n0 () = 
   let n = ref n0 in
   let act = if opt.twopage then merge else split in
-  while get_pos !n < get_pos !n.next do act !n; n := !n.next done
+  while get_pos !n <= get_pos !n.next do act !n; n := !n.next done; act !n
 
 let toggle_twopage () =
   opt.twopage <- not opt.twopage;
@@ -414,9 +449,8 @@ let toggle_twopage () =
 
 let toggle_single_page n =
   match n.pics with
-      [] | _ :: _ :: _ :: _ -> assert false
-    | [_] -> merge n; regroup_pages n ()
-    | [_;_] -> split n; regroup_pages n.next ()
+    | One _ -> merge n; regroup_pages n.next ()
+    | Two _ -> split n; regroup_pages n.next ()
 
 let toggle_cur_twopage () = toggle_single_page !cur_node
 
@@ -465,6 +499,8 @@ let zoom ar_val ar_func =
 let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
 and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Zoom (ar /. 0.95))
 and toggle_zoom () = zoom 1.0 (fun _ -> Fit_both)
+
+
 
 (* gets set to first and last books when they're built *)
 let first_last = ref None
