@@ -38,6 +38,9 @@ let opt = {
 }
 
 
+let print_scrollers adj1 adj2 =
+  Printf.printf "scrollers: (%.0f-%.0f)@%.0f PS,PI: %.0f,%0.f \t(%.0f-%.0f)@%.0f PS,PI %.0f,%0.f\n" adj1#lower adj1#upper adj1#value adj1#page_size adj1#page_increment adj2#lower adj2#upper adj2#value adj2#page_size adj2#page_increment; flush stdout
+
 (* GTK WIDGETS *)
 
 let window_width = 900 and window_height = 700
@@ -48,8 +51,13 @@ let pane = GPack.paned `VERTICAL ~packing:window#add ()
 
  let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
  let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
+(*;
+   ignore(scroller#hadjustment#connect#changed (fun () -> print_string "H-changed: "; print_scrollers scroller#hadjustment scroller#vadjustment));
+   ignore(scroller#hadjustment#connect#value_changed (fun () -> print_string "H-Value changed "; print_scrollers scroller#hadjustment scroller#vadjustment));
+   ignore(scroller#vadjustment#connect#changed (fun () -> print_string "V-changed "; print_scrollers scroller#hadjustment scroller#vadjustment));
+   ignore(scroller#vadjustment#connect#value_changed (fun () -> print_string "V-Value changed "; print_scrollers scroller#hadjustment scroller#vadjustment)) *)
  let image = GMisc.image ~packing:scroller#add_with_viewport ()
-
+   
  let footer = GPack.hbox ~packing:pane#pack2 ()
   let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
   let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
@@ -246,7 +254,7 @@ let extract_archive file dir =
     | `None -> assert false
 
 let rec rec_del fn path = 
-  Printf.eprintf "Cleaning up %s (from archive %s)" path fn;
+  Printf.eprintf "Cleaning up %s (from archive %s)\n" path fn;
   let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
   Sys.readdir path
     |> Array.map (fun fn -> Filename.concat path fn)
@@ -329,9 +337,6 @@ let set_pb =
   let l = ref [] in
   fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()
 
-let print_scrollers adj1 adj2 =
-  Printf.eprintf "scrollers: (%4.0f-%4.0f)@%4.0f PJ: %4.0f \t(%4.0f-%4.0f)@%4.0f PJ %4.0f\n" adj1#lower adj1#upper adj1#value adj1#page_size adj2#lower adj2#upper adj2#value adj2#page_size; flush stderr
-
 let epsilon = 0.00001
 
 let set_node_pixbuf size n interp = 
@@ -345,15 +350,18 @@ let set_node_pixbuf size n interp =
       ignore (Glib.Main.iteration true);
       let hadj = scroller#hadjustment 
       and vadj = scroller#vadjustment in
-      print_scrollers hadj vadj;
-      if hadj#value +. hadj#page_size < hadj#upper || vadj#value +. vadj#page_size < vadj#upper then begin
+(*      print_scrollers hadj vadj;*)
+      let hmax = hadj#upper -. hadj#page_size
+      and vmax = vadj#upper -. vadj#page_size in
+      if hadj#value < hmax || vadj#value < vmax then begin
 	vadj#set_value vadj#lower;
-	hadj#set_value (if opt.manga then hadj#upper else hadj#lower);
+	hadj#set_value (if opt.manga then hmax else hadj#lower);
       end else begin
-	vadj#set_value vadj#upper;
-	hadj#set_value hadj#upper;
+	vadj#set_value vadj#lower;
+	hadj#set_value hadj#lower;
       end;
-      print_scrollers hadj vadj;
+(*      print_scrollers hadj vadj;
+*)
     end
   in
   match n.pixbuf with 
@@ -362,9 +370,6 @@ let set_node_pixbuf size n interp =
 	let pb = (scale_raw ar_size ~interp (fresh_pixbuf n)) in
 	set_pb n pb;
 	display pb
-
-
-
 
 let idle_scale node =
   let scaler () =
@@ -399,6 +404,26 @@ let last_page () = !cur_node.book.last_page
   
 let new_page get_page () = 
   cur_node := get_page (); show_spread ()
+
+let magic_next () = 
+  let hadj = scroller#hadjustment and vadj = scroller#vadjustment in
+  let vupper = vadj#upper -. vadj#page_size
+  and hupper = hadj#upper -. hadj#page_size in
+(*  print_scrollers hadj vadj; *)
+  if vadj#value < vupper -. 1. then begin
+(*    Printf.printf "V-step down %.1f < %.1f - 1\n"vadj#value vupper;*)
+    vadj#set_value (min (vadj#value +. vadj#page_increment) vupper);
+(*    vadj#emit changed TODO: HOW?*)
+  end else if (not opt.manga) && hadj#value < hupper -. 1. then begin
+(*    Printf.printf "H-step right %.1f < %.1f - 1\n" hadj#value hupper;*)
+    if vadj#value != 0. then vadj#set_value 0.;
+    hadj#set_value (min (hadj#value +. hadj#page_increment) hupper);
+  end else if opt.manga && hadj#value > 1. then begin
+(*    Printf.printf "H-step left %.1f > 1\n" hadj#value;*)
+    if vadj#value != 0. then vadj#set_value 0.;
+    hadj#set_value (max (hadj#value -. hadj#page_increment) 0.);
+  end else
+    new_page next_page ()
     
 let find_page i () = 
   assert (within_book_range i);
@@ -519,7 +544,7 @@ let actions = [(_q, Main.quit);
 	    (_Left, new_page prev_page); 
 	    (_Up, new_page prev_page); (_BackSpace, new_page prev_page);
 	    (_Right, new_page next_page); (_Down, new_page next_page); 
-	    (_space, new_page next_page);
+	    (_space, magic_next);
 	    (_f, toggle_fullscreen); (_F11, toggle_fullscreen);
 	    (_Escape, exit_fullscreen); (_t, toggle_twopage);
 	    (_m, toggle_manga); (_z, toggle_zoom);
