@@ -324,7 +324,7 @@ let add_node_after n ifsl =
 	    pics = ifsl;} in
   n.next <- n1; n1.next.prev <- n1
 
-let gen_pages b () = 
+let gen_nodes b () = 
   let page ifsl = 
     add_node_after b.last_page ifsl; 
     b.last_page <- b.last_page.next; 
@@ -617,7 +617,7 @@ let main () =
 	new_page (fun () -> n0) ();
 	first_last := Some (n0.book,nx.book);
 	let rec load_book_pages n i = 
-	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_pages n.book));
+	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_nodes n.book));
 	  if n != nx then load_book_pages n.next (succ i)
 	in
 	load_book_pages n0 0
