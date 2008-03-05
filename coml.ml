@@ -20,7 +20,8 @@
 
 
    
-   Compile with: 
+   Compile with community-ocaml 
+   (http://repo.or.cz/w/ocaml.git branch community/trunk)
    
    % make
    
@@ -185,38 +186,6 @@ let get_size s = match s.pics with One i -> i.size | Two(i1,i2) ->
 let is_vert ifs = let w0,h0 = ifs.size in w0 < h0
 let gen_ifs i f = {idx=i;filename=f;size=pixbuf_size (GdkPixbuf.from_file f)}
 
-let gen_ifs_cache b i f = 
-  let pb = get_page b i f in
-  {idx=i; filename=f; size=pixbuf_size pb}
-
-let add_node_after n ifsl = 
-  let n1 = {next = n.next; prev=n; book=n.book; 
-	    pixbuf = None; scaler = None; 
-	    pics = ifsl;} in
-  n.next <- n1; n1.next.prev <- n1
-
-let gen_pages b () = 
-  let page ifsl = 
-    add_node_after b.last_page ifsl; 
-    b.last_page <- b.last_page.next; 
-    true 
-  in
-  match b.more_files with [] -> false
-    | f1 :: rest -> 
-	b.more_files <- rest;
-	let pos_n = (last_idx b.last_page + 1) in
-	let ifs1 = gen_ifs_cache b pos_n f1 in
-	if opt.twopage && is_vert ifs1 then
-	  match b.more_files with 
-	      [] -> page (One ifs1)
-	    | f2 :: rest -> 
-		let ifs2 = gen_ifs_cache b (pos_n+1) f2 in
-		if is_vert ifs2 
-		then (b.more_files <- rest; page (Two (ifs1,ifs2)))
-		else page (One ifs1)
-	else 
-	  page (One ifs1)
-
 let make_book lib title files = 
   let files = files |> Array.of_list in
   let len = Array.length files in
@@ -349,11 +318,42 @@ let cleanup_task l = singleton_task spread_gc_prio
      List.iter (fun n -> n.pixbuf <- None) rem; l := l'
   )
   
+let gen_ifs_cached b i f = 
+  let pb = get_page b i f in
+  {idx=i; filename=f; size=pixbuf_size pb}
+
+let add_node_after n ifsl = 
+  let n1 = {next = n.next; prev=n; book=n.book; 
+	    pixbuf = None; scaler = None; 
+	    pics = ifsl;} in
+  n.next <- n1; n1.next.prev <- n1
+
+let gen_pages b () = 
+  let page ifsl = 
+    add_node_after b.last_page ifsl; 
+    b.last_page <- b.last_page.next; 
+    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
+    true 
+  in
+  match b.more_files with [] -> false
+    | f1 :: rest -> 
+	b.more_files <- rest;
+	let pos_n = (last_idx b.last_page + 1) in
+	let ifs1 = gen_ifs_cached b pos_n f1 in
+	if opt.twopage && is_vert ifs1 then
+	  match b.more_files with 
+	      [] -> page (One ifs1)
+	    | f2 :: rest -> 
+		let ifs2 = gen_ifs_cached b (pos_n+1) f2 in
+		if is_vert ifs2 
+		then (b.more_files <- rest; page (Two (ifs1,ifs2)))
+		else page (One ifs1)
+	else 
+	  page (One ifs1)
+
 let set_pb = 
   let l = ref [] in
   fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()
-
-let epsilon = 0.00001
 
 let set_node_pixbuf size n interp = 
   let zoom = find_zoom size (get_size n) opt.fit in
