@@ -175,7 +175,6 @@ let get_page cache idx fn =
     | None -> let pb = GdkPixbuf.from_file fn in
       Weak.set cache idx (Some pb);
       pb
-let get_page_ifs c ifs = get_page c ifs.idx ifs.filename    
 
 let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
 let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
@@ -256,8 +255,7 @@ let build_books l =
   let rec expand_list = function
     | h when not (Sys.file_exists h) -> ()
     | h when is_directory h ->
-	let hlen = String.length h in
-	let h = if h.[hlen-1] = '/' then String.sub h 0 (hlen-1) else h in
+	let h = if h.[String.length h-1] = '/' then String.rchop h else h in
 	let title = Filename.basename h in
 	files_in h |> List.filter is_picture |> add_entries title;
     | h when is_archive h ->
@@ -270,12 +268,6 @@ let build_books l =
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
 	and title = Filename.basename h in
-(*Printf.eprintf "Title:%s\nFiles:\n" title;
-List.iter (Printf.eprintf "%s\n") files;
-Printf.eprintf "Dirs:\n";
-List.iter (Printf.eprintf "%s\n") dirs;
-Printf.eprintf "Contents:\n";
-List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 	files |> List.filter is_picture |> add_entries title;
 	List.iter expand_list dirs;
     | h when is_picture h ->
@@ -289,7 +281,7 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 ;;
  
 let fresh_pixbuf s =
-  let get_page i = get_page_ifs s.book.page_cache i in
+  let get_page i = get_page s.book.page_cache i.idx i.filename in
   match s.pics with
       One i -> get_page i
     | Two (i1,i2) -> 
