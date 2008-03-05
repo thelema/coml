@@ -185,27 +185,30 @@ let get_size s = match s.pics with One i -> i.size | Two(i1,i2) ->
 let is_vert ifs = let w0,h0 = ifs.size in w0 < h0
 let gen_ifs i f = {idx=i;filename=f;size=pixbuf_size (GdkPixbuf.from_file f)}
 
-let make_book lib title files = 
+let rec make_book lib title files = 
   let files = files |> Array.of_list in
   let len = Array.length files in
   Array.sort numeric_compare files; (* TODO: schwarzian transform - sort properly *)
   let files = files |> Array.to_list in
   match files with [] -> lib
     | p0 :: rest -> 
-	let rec n = {next = n; prev = n; book = b; pixbuf = None;
-		     scaler = None; pics = One(gen_ifs 0 p0);}
-	and b = {title=title; more_files=rest; 
-		 first_page=n; last_page=n; 
-		 page_cache = Weak.create len} in
-	Printf.eprintf "Making book %s with %d files\n" title len; flush stderr;
-	match lib with
-	    None -> 
-	      Some (n,n)
-	  | Some (n0,nx) ->
-	      n.prev <- nx; 
-	      nx.next <- n;
-	      if opt.wrap then (n.next <- n0; n0.prev <- n );
-	      Some (n0,n)
+	try 
+	  let rec n = {next = n; prev = n; book = b; pixbuf = None;
+		       scaler = None; pics = One(gen_ifs 0 p0);} 
+	                                (* gen_ifs failure caught below *)
+	  and b = {title=title; more_files=rest; 
+		   first_page=n; last_page=n; 
+		   page_cache = Weak.create len} in
+	  Printf.eprintf "Making book %s with %d files\n" title len; flush stderr;
+	  match lib with
+	      None -> Some (n,n)
+	    | Some (n0,nx) ->
+		n.prev <- nx; nx.next <- n;
+		if opt.wrap then (n.next <- n0; n0.prev <- n );
+		Some (n0,n)
+	with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+	  Printf.eprintf "Failed loading %s: %s" p0 msg;
+	  make_book lib title rest
 
 let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
 let idxes_on_disp () = get_idxes !cur_node
@@ -332,17 +335,26 @@ let gen_pages b () =
     | f1 :: rest -> 
 	b.more_files <- rest;
 	let pos_n = (last_idx b.last_page + 1) in
-	let ifs1 = gen_ifs pos_n f1 in
-	if opt.twopage && is_vert ifs1 then
-	  match b.more_files with 
-	      [] -> page (One ifs1)
-	    | f2 :: rest -> 
-		let ifs2 = gen_ifs (pos_n+1) f2 in
-		if is_vert ifs2 
-		then (b.more_files <- rest; page (Two (ifs1,ifs2)))
-		else page (One ifs1)
-	else 
-	  page (One ifs1)
+	try 
+	  let ifs1 = gen_ifs pos_n f1 in
+	  if opt.twopage && is_vert ifs1 then
+	    match b.more_files with 
+		[] -> page (One ifs1)
+	      | f2 :: rest -> 
+		  try 
+		    let ifs2 = gen_ifs (pos_n+1) f2 in
+		    if is_vert ifs2 
+		    then (b.more_files <- rest; page (Two (ifs1,ifs2)))
+		    else page (One ifs1)
+		  with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+		    Printf.eprintf "Failed loading %s: %s\n" f2 msg;
+		    page (One ifs1)
+
+	  else 
+	    page (One ifs1)
+	with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+	  Printf.eprintf "Failed loading %s: %s\n" f1 msg;
+	  true
 
 let set_pb = 
   let l = ref [] in
