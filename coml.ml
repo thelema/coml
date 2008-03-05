@@ -169,13 +169,13 @@ and book = { title: string;
 	     page_cache : GdkPixbuf.pixbuf Weak.t;
 	   }
 
-let get_page b idx fn =
-  match Weak.get b.page_cache idx with 
+let get_page cache idx fn =
+  match Weak.get cache idx with 
       Some pb -> pb 
     | None -> let pb = GdkPixbuf.from_file fn in
-      Weak.set b.page_cache idx (Some pb);
+      Weak.set cache idx (Some pb);
       pb
-let get_page_ifs b ifs = get_page b ifs.idx ifs.filename    
+let get_page_ifs c ifs = get_page c ifs.idx ifs.filename    
 
 let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
 let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
@@ -289,8 +289,9 @@ List.iter (Printf.eprintf "%s\n") contents; flush stderr; *)
 ;;
  
 let fresh_pixbuf s =
+  let get_page i = get_page_ifs s.book.page_cache i in
   match s.pics with
-      One i -> get_page_ifs s.book i
+      One i -> get_page i
     | Two (i1,i2) -> 
 	let ow,oh = get_size s in
 	let out_buf = GdkPixbuf.create ~width:ow ~height:oh ~has_alpha:true () in
@@ -302,7 +303,7 @@ let fresh_pixbuf s =
 	  GdkPixbuf.copy_area ~dest:out_buf ~dest_x ~dest_y ~width ~height pb;
 	  copier (dest_x + width) rest
 	in
-	let pics = [get_page_ifs s.book i1; get_page_ifs s.book i2] in
+	let pics = [get_page i1; get_page i2] in
 	let pics = if opt.manga then List.rev pics else pics in
 	copier 0 pics;
 	out_buf
@@ -318,8 +319,8 @@ let cleanup_task l = singleton_task spread_gc_prio
      List.iter (fun n -> n.pixbuf <- None) rem; l := l'
   )
   
-let gen_ifs_cached b i f = 
-  let pb = get_page b i f in
+let gen_ifs_cached c i f = 
+  let pb = get_page c i f in
   {idx=i; filename=f; size=pixbuf_size pb}
 
 let add_node_after n ifsl = 
@@ -334,17 +335,17 @@ let gen_pages b () =
     b.last_page <- b.last_page.next; 
     window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
     true 
-  in
+  and gen_ifs n fn = gen_ifs_cached b.page_cache n fn in
   match b.more_files with [] -> false
     | f1 :: rest -> 
 	b.more_files <- rest;
 	let pos_n = (last_idx b.last_page + 1) in
-	let ifs1 = gen_ifs_cached b pos_n f1 in
+	let ifs1 = gen_ifs pos_n f1 in
 	if opt.twopage && is_vert ifs1 then
 	  match b.more_files with 
 	      [] -> page (One ifs1)
 	    | f2 :: rest -> 
-		let ifs2 = gen_ifs_cached b (pos_n+1) f2 in
+		let ifs2 = gen_ifs (pos_n+1) f2 in
 		if is_vert ifs2 
 		then (b.more_files <- rest; page (Two (ifs1,ifs2)))
 		else page (One ifs1)
