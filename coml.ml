@@ -32,6 +32,7 @@ let (|>) x f = f x
 let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
    
 open GMain
+open Printf
    
 type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
@@ -150,9 +151,11 @@ let numeric_compare s1 s2 =
       Int64.compare n1 n2
     end
 
-type ifs = {idx : int; filename: string; size: int * int}
+type ifs = {idx : int; filename: string; size: (int * int) Lazy.t}
 
 type spread = One of ifs | Two of ifs * ifs
+
+type more_t = Fn of string | Loaded of ifs
 
 type node = { mutable next : node; 
 	      mutable prev: node;
@@ -165,7 +168,7 @@ and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
 	     (* all files not yet made into nodes *)
-	     mutable more_files : string list; 
+	     mutable more_files : ifs list;
 	     page_cache : GdkPixbuf.pixbuf Weak.t;
 	   }
 
@@ -175,40 +178,58 @@ let get_page cache idx fn =
     | None -> let pb = GdkPixbuf.from_file fn in
       Weak.set cache idx (Some pb);
       pb
+let gen_ifs_lazy c i f = 
+  {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))}
 
 let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
 let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
 let last_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> max i1.idx i2.idx
 let get_pos s = first_idx s
-let get_size s = match s.pics with One i -> i.size | Two(i1,i2) -> 
-  let merge_size (w1,h1) (w2,h2) = (w1 + w2, max h1 h2) in merge_size i1.size i2.size
-let is_vert ifs = let w0,h0 = ifs.size in w0 < h0
-let gen_ifs i f = {idx=i;filename=f;size=pixbuf_size (GdkPixbuf.from_file f)}
+let merge_size (w1,h1) (w2,h2) = (w1 + w2, max h1 h2)
+let get_isize i = 
+  try Lazy.force i.size 
+  with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+    Printf.eprintf "Failed loading %s: %s\n" i.filename msg; 0,0
+let get_size s = match s.pics with One i -> get_isize i 
+  | Two(i1,i2) ->  merge_size (get_isize i1) (get_isize i2)
+let is_vert ifs = let w0,h0 = get_isize ifs in w0 < h0
 
-let rec make_book lib title files = 
+
+let to_ifses pc l = List.mapi (fun i fn -> gen_ifs_lazy pc (i+1) fn) l
+
+let make_book lib title files = 
   let files = files |> Array.of_list in
   let len = Array.length files in
   Array.sort numeric_compare files; (* TODO: schwarzian transform - sort properly *)
   let files = files |> Array.to_list in
-  match files with [] -> lib
-    | p0 :: rest -> 
+  let rec make_n0 = function 
+      [] -> failwith "No files in list"
+    | p0 :: tail -> 
 	try 
+	  let ifs = {idx = 0; filename=p0; 
+		     size=lazy(pixbuf_size (GdkPixbuf.from_file p0))} 
+	  and pc = Weak.create len in
 	  let rec n = {next = n; prev = n; book = b; pixbuf = None;
-		       scaler = None; pics = One(gen_ifs 0 p0);} 
-	                                (* gen_ifs failure caught below *)
-	  and b = {title=title; more_files=rest; 
-		   first_page=n; last_page=n; 
-		   page_cache = Weak.create len} in
-	  Printf.eprintf "Making book %s with %d files\n" title len; flush stderr;
-	  match lib with
-	      None -> Some (n,n)
-	    | Some (n0,nx) ->
-		n.prev <- nx; nx.next <- n;
-		if opt.wrap then (n.next <- n0; n0.prev <- n );
-		Some (n0,n)
+		       scaler = None; pics = One ifs;} 
+	    (* gen_ifs failure caught below *)
+	  and b = {title=title; more_files = to_ifses pc tail;
+		   first_page=n; last_page=n; page_cache = pc} in
+	  eprintf "Making book %s with %d files\n" title len; flush stderr;
+	  n
 	with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-	  Printf.eprintf "Failed loading %s: %s" p0 msg;
-	  make_book lib title rest
+	  eprintf "Failed loading %s: %s\n" p0 msg;
+	  make_n0 tail
+  in
+  try 
+    let n = make_n0 files in (* could fail *)
+    match lib with
+      | None -> Some (n,n)
+      | Some (n0,nx) ->
+	n.prev <- nx; nx.next <- n;
+	if opt.wrap then (n.next <- n0; n0.prev <- n );
+	Some (n0,n)
+  with Failure _ -> lib
+		
 
 let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
 let idxes_on_disp () = get_idxes !cur_node
@@ -256,25 +277,25 @@ let build_books l =
   let titles = ref [] in (* title -> unit -- single-binding per title *)
   let add_entries t fs = List.iter (Hashtbl.add ht t) fs; if not (List.mem t !titles) then titles := !titles @ [t] in
   let rec expand_list = function
-    | h when not (Sys.file_exists h) -> ()
-    | h when is_directory h ->
-	let h = if h.[String.length h-1] = '/' then String.rchop h else h in
-	let title = Filename.basename h in
-	files_in h |> List.filter is_picture |> add_entries title;
-    | h when is_archive h ->
+    | fn when not (Sys.file_exists fn) -> ()
+    | fn when is_directory fn ->
+	let fn = String.chomp ~char:'/' fn in
+	let title = Filename.basename fn in
+	files_in fn |> List.filter is_picture |> add_entries title;
+    | fn when is_archive fn ->
       let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
       (* extract archive to td *)
-      let return_code = extract_archive h td in
+      let return_code = extract_archive fn td in
       (* on quit, remove the extracted archive *)
-      at_exit (fun () -> rec_del h td);
+      at_exit (fun () -> rec_del fn td);
       if return_code = 0 && Sys.file_exists td then
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
-	and title = Filename.basename h in
+	and title = Filename.basename fn in
 	files |> List.filter is_picture |> add_entries title;
 	List.iter expand_list dirs;
-    | h when is_picture h ->
-	add_entries (Filename.basename h) [h];
+    | fn when is_picture fn ->
+	add_entries (Filename.basename fn) [fn];
     | _ -> (* garbage file *) ()
   in
   List.iter expand_list l; (* stores results in hashtables ht & titles *)
@@ -314,9 +335,6 @@ let cleanup_task l = singleton_task spread_gc_prio
      List.iter (fun n -> n.pixbuf <- None) rem; l := l'
   )
   
-let gen_ifs_cached c i f = 
-  let pb = get_page c i f in
-  {idx=i; filename=f; size=pixbuf_size pb}
 
 let add_node_after n ifsl = 
   let n1 = {next = n.next; prev=n; book=n.book; 
@@ -324,37 +342,22 @@ let add_node_after n ifsl =
 	    pics = ifsl;} in
   n.next <- n1; n1.next.prev <- n1
 
+(*
+*)
+
 let gen_nodes b () = 
   let page ifsl = 
     add_node_after b.last_page ifsl; 
     b.last_page <- b.last_page.next; 
     window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
     true 
-  and gen_ifs n fn = gen_ifs_cached b.page_cache n fn in
-  match b.more_files with [] -> false
-    | f1 :: rest -> 
-	b.more_files <- rest;
-	let pos_n = (last_idx b.last_page + 1) in
-	try 
-	  let ifs1 = gen_ifs pos_n f1 in
-	  if opt.twopage && is_vert ifs1 then
-	    match b.more_files with 
-		[] -> page (One ifs1)
-	      | f2 :: rest -> 
-		  try 
-		    let ifs2 = gen_ifs (pos_n+1) f2 in
-		    if is_vert ifs2 
-		    then (b.more_files <- rest; page (Two (ifs1,ifs2)))
-		    else page (One ifs1)
-		  with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-		    Printf.eprintf "Failed loading %s: %s\n" f2 msg;
-		    page (One ifs1)
-
-	  else 
-	    page (One ifs1)
-	with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-	  Printf.eprintf "Failed loading %s: %s\n" f1 msg;
-	  true
+  and can_join ifs1 ifs2 = opt.twopage && is_vert ifs1 && is_vert ifs2 in
+  match b.more_files with 
+    | i1 :: i2 :: rest when can_join i1 i2 -> 
+	b.more_files <- rest; page (Two (i1,i2))
+    | i1 :: rest (* can't join with next *)-> 
+	b.more_files <- rest; page (One i1)
+    | [] -> false
 
 let set_pb = 
   let l = ref [] in
@@ -424,7 +427,9 @@ let first_page () = !cur_node.book.first_page
 let last_page () = !cur_node.book.last_page
   
 let new_page get_page () = 
-  cur_node := get_page (); show_spread ()
+  cur_node := get_page (); 
+  if !cur_node.next.prev != !cur_node then eprintf "Linking failure: %s:%d/%d\n" (!cur_node.book.title) (get_pos !cur_node) (get_pos !cur_node.book.last_page);
+  show_spread ()
 
 let magic_next () = 
   let hadj = scroller#hadjustment and vadj = scroller#vadjustment in
