@@ -69,11 +69,6 @@ let pane = GPack.paned `VERTICAL ~packing:window#add ()
 
  let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
  let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
-(*;
-   ignore(scroller#hadjustment#connect#changed (fun () -> print_string "H-changed: "; print_scrollers scroller#hadjustment scroller#vadjustment));
-   ignore(scroller#hadjustment#connect#value_changed (fun () -> print_string "H-Value changed "; print_scrollers scroller#hadjustment scroller#vadjustment));
-   ignore(scroller#vadjustment#connect#changed (fun () -> print_string "V-changed "; print_scrollers scroller#hadjustment scroller#vadjustment));
-   ignore(scroller#vadjustment#connect#value_changed (fun () -> print_string "V-Value changed "; print_scrollers scroller#hadjustment scroller#vadjustment)) *)
  let image = GMisc.image ~packing:scroller#add_with_viewport ()
    
  let footer = GPack.hbox ~packing:pane#pack2 ()
@@ -91,7 +86,7 @@ let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocati
 
 let preload_prio = 130 and show_prio = 115 
 and scale_prio = 140 and gen_page_prio = 150 
-and spread_gc_prio = 145
+and spread_gc_prio = 145 and spread_clean_prio = 100
 
 let failed_load = GdkPixbuf.create 1 1 ()
 
@@ -155,7 +150,8 @@ type ifs = {idx : int; filename: string; size: (int * int) Lazy.t}
 
 type spread = One of ifs | Two of ifs * ifs
 
-type more_t = Fn of string | Loaded of ifs
+type future = | Many of (string * string list) list Lazy.t 
+	      | Single of ifs list
 
 type node = { mutable next : node; 
 	      mutable prev: node;
@@ -168,8 +164,9 @@ and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
 	     (* all files not yet made into nodes *)
-	     mutable more_files : ifs list;
-	     page_cache : GdkPixbuf.pixbuf Weak.t;
+	     (* [ (title,fn list) ] *)
+	     mutable more_files : future;
+	     mutable page_cache : GdkPixbuf.pixbuf Weak.t;
 	   }
 
 let get_page cache idx fn =
@@ -178,77 +175,29 @@ let get_page cache idx fn =
     | None -> let pb = GdkPixbuf.from_file fn in
       Weak.set cache idx (Some pb);
       pb
-let gen_ifs_lazy c i f = 
-  {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))}
 
 let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
 let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
 let last_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> max i1.idx i2.idx
 let get_pos s = first_idx s
 let merge_size (w1,h1) (w2,h2) = (w1 + w2, max h1 h2)
-let get_isize i = 
-  try Lazy.force i.size 
-  with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-    Printf.eprintf "Failed loading %s: %s\n" i.filename msg; 0,0
+let get_isize i = Lazy.force i.size
 let get_size s = match s.pics with One i -> get_isize i 
   | Two(i1,i2) ->  merge_size (get_isize i1) (get_isize i2)
 let is_vert ifs = let w0,h0 = get_isize ifs in w0 < h0
 
 
-let to_ifses pc l = List.mapi (fun i fn -> gen_ifs_lazy pc (i+1) fn) l
-
-let make_book lib title files = 
-  let files = files |> Array.of_list in
-  let len = Array.length files in
-  Array.sort numeric_compare files; (* TODO: schwarzian transform - sort properly *)
-  let files = files |> Array.to_list in
-  let rec make_n0 = function 
-      [] -> failwith "No files in list"
-    | p0 :: tail -> 
-	try 
-	  let ifs = {idx = 0; filename=p0; 
-		     size=lazy(pixbuf_size (GdkPixbuf.from_file p0))} 
-	  and pc = Weak.create len in
-	  let rec n = {next = n; prev = n; book = b; pixbuf = None;
-		       scaler = None; pics = One ifs;} 
-	    (* gen_ifs failure caught below *)
-	  and b = {title=title; more_files = to_ifses pc tail;
-		   first_page=n; last_page=n; page_cache = pc} in
-	  eprintf "Making book %s with %d files\n" title len; flush stderr;
-	  n
-	with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-	  eprintf "Failed loading %s: %s\n" p0 msg;
-	  make_n0 tail
-  in
-  try 
-    let n = make_n0 files in (* could fail *)
-    match lib with
-      | None -> Some (n,n)
-      | Some (n0,nx) ->
-	n.prev <- nx; nx.next <- n;
-	if opt.wrap then (n.next <- n0; n0.prev <- n );
-	Some (n0,n)
-  with Failure _ -> lib
-		
-
-let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
-let idxes_on_disp () = get_idxes !cur_node
-let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
-let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
-
-let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
-
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
-
+  
 let fold_sufchecks fn set_acc init suf_list = 
   let folder acc (s, tag) =
     if Filename.check_suffix fn s then set_acc tag else acc in 
   List.fold_left folder init suf_list
-
+    
 let suffix_type suf_list fn = fold_sufchecks fn (fun tag -> tag) `None suf_list
 let any_suffix suf_list fn = fold_sufchecks fn (fun _ -> true) false suf_list
-
+  
 let archive_type fn = suffix_type archive_suffixes fn
 let is_archive fn = any_suffix archive_suffixes fn
 let is_picture fn = any_suffix pic_suffixes fn
@@ -271,12 +220,16 @@ let rec rec_del fn path =
 		   else remove fn);
     Unix.rmdir path
 
-let build_books l = 
+let to_clusters filename =   
   let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
   let ht = Hashtbl.create 50 in (* title -> filename  -- multiple bindings *)
-  let titles = ref [] in (* title -> unit -- single-binding per title *)
-  let add_entries t fs = List.iter (Hashtbl.add ht t) fs; if not (List.mem t !titles) then titles := !titles @ [t] in
-  let rec expand_list = function
+  let titles = ref [] in (* title set - single entry per title *)
+  let add_entries t fs = 
+    List.iter (Hashtbl.add ht t) fs; 
+    if fs <> [] && not (List.mem t !titles) then titles := t :: !titles;
+  in
+  let rec expand_list fn = printf "Expanding: %s\n" fn;
+match fn with 
     | fn when not (Sys.file_exists fn) -> ()
     | fn when is_directory fn ->
 	let fn = String.chomp ~char:'/' fn in
@@ -293,15 +246,98 @@ let build_books l =
 	let dirs,files = List.partition is_directory contents
 	and title = Filename.basename fn in
 	files |> List.filter is_picture |> add_entries title;
-	List.iter expand_list dirs;
+	List.iter expand_list dirs
     | fn when is_picture fn ->
 	add_entries (Filename.basename fn) [fn];
-    | _ -> (* garbage file *) ()
+    | _ -> (* garbage file *) () 
   in
-  List.iter expand_list l; (* stores results in hashtables ht & titles *)
+  let get_group acc t = 
+    (* TODO: schwarzian transform *)
+    let files = Hashtbl.find_all ht t |> List.sort numeric_compare in 
+    (t, files) :: acc in
+  expand_list filename;
+  List.fold_left get_group [] !titles
 
-  let add_book l t = make_book l t (Hashtbl.find_all ht t) in
-  List.fold_left add_book None !titles
+let add_node_after n0 ?(book=n0.book) ifsl = (* ugly because of handling final node's pointer to self *)
+  let n2 = n0.next in
+  if n2.prev == n0 then 
+    let n1 = {next = n2; prev=n0; book=book; 
+	      pixbuf = None; scaler = None; 
+	      pics = ifsl;} in
+    n0.next <- n1; n2.prev <- n1
+  else 
+    let rec n1 = {next = n1; prev=n0; book=book; 
+	      pixbuf = None; scaler = None; 
+	      pics = ifsl;} in
+    n0.next <- n1
+
+(*TODO: ENDPOINT TESTS? *)
+let del_node n = n.prev.next <- n.next; n.next.prev <- n.prev
+let link from_n to_n = to_n.prev <- from_n; from_n.next <- to_n
+
+let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
+let idxes_on_disp () = get_idxes !cur_node
+let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
+let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
+
+let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
+let rec gen_nodes b () = 
+  let gen_ifs_lazy c i f = 
+    {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
+  let gen_ifses c l = List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
+  let make_book (title, files) = 
+    eprintf "Making book %s with %d pages\n" title (List.length files); flush stderr;
+    match files with [] -> ()
+      | p0 :: rest -> 
+	  let pc = Weak.create (1+List.length rest) in
+	  let rec n0 = {next = n0; prev = n0; book = b1; pixbuf = None;
+			scaler = None; pics = One (gen_ifs_lazy pc 0 p0);} 
+	  and b1 = {title=title; first_page=n0; last_page=n0; 
+		   more_files = Single (gen_ifses pc rest);
+		   page_cache = pc } in
+	  let n_prev = b.last_page and n_next = b.last_page.next in
+	  link n_prev n0; link n0 n_next;
+	  ignore(Idle.add ~prio:(gen_page_prio) (gen_nodes b1));
+  in
+  let page ifsl = 
+    add_node_after b.last_page ifsl; 
+    b.last_page <- b.last_page.next;
+    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
+    true 
+  and can_join ifs1 ifs2 = opt.twopage && is_vert ifs1 && is_vert ifs2 in
+  match b.more_files with
+    | Single(i1 :: i2 :: rest) when can_join i1 i2 -> 
+	b.more_files <- Single rest; page (Two (i1,i2))
+    | Single(i1 :: rest) (* can't join with next *)-> 
+	b.more_files <- Single rest; page (One i1)
+    | Single [] -> false
+    | Many bks -> 
+	let more = Lazy.force bks in
+	eprintf "generating %d books\n" (List.length more); flush stderr;
+	List.iter make_book more;
+	del_node b.last_page;
+	false
+
+let make_book lib file =
+  let n = 
+    let get_p0 = lazy(pixbuf_size (GdkPixbuf.from_file file)) in
+    let ifs = {idx = 0; filename=file; size=get_p0} in
+    let rec n0 = {next = n0; prev = n0; book = b; pixbuf = None;
+		 scaler = None; pics = One ifs;} 
+    and b = {title=file; first_page=n0; last_page=n0; 
+	     more_files = Many (Lazy.lazy_from_fun(fun () ->to_clusters file));
+	     page_cache = Weak.create 1} in
+    n0
+  in
+  let link from_n to_n = to_n.prev <- from_n; from_n.next <- to_n in
+  match lib with
+    | None -> Some (n,n)
+    | Some (n0,nx) ->
+	link nx n; (* put n after nx *)
+	if opt.wrap then link n n0; (* put n0 after n *)
+	Some (n0,n)
+
+let build_books l = List.fold_left make_book None l
 ;;
  
 let fresh_pixbuf s =
@@ -335,38 +371,16 @@ let cleanup_task l = singleton_task spread_gc_prio
      List.iter (fun n -> n.pixbuf <- None) rem; l := l'
   )
   
+let cleanup_all_task l = singleton_task spread_clean_prio
+  (fun () -> List.iter (fun n -> n.pixbuf <- None) !l; l := []; )
 
-let add_node_after n ifsl = 
-  let n1 = {next = n.next; prev=n; book=n.book; 
-	    pixbuf = None; scaler = None; 
-	    pics = ifsl;} in
-  n.next <- n1; n1.next.prev <- n1
-
-(*
-*)
-
-let gen_nodes b () = 
-  let page ifsl = 
-    add_node_after b.last_page ifsl; 
-    b.last_page <- b.last_page.next; 
-    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
-    true 
-  and can_join ifs1 ifs2 = opt.twopage && is_vert ifs1 && is_vert ifs2 in
-  match b.more_files with 
-    | i1 :: i2 :: rest when can_join i1 i2 -> 
-	b.more_files <- rest; page (Two (i1,i2))
-    | i1 :: rest (* can't join with next *)-> 
-	b.more_files <- rest; page (One i1)
-    | [] -> false
-
-let set_pb = 
+let set_pb,reset_pb = 
   let l = ref [] in
-  fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()
+  (fun n pb -> n.pixbuf <- Some pb; l := n :: !l; if List.length !l > 15 then cleanup_task l ()),
+  (fun () -> cleanup_all_task l ())
 
 let set_node_pixbuf size n interp = 
-  let zoom = find_zoom size (get_size n) opt.fit in
-  let ar_size = mul_size (get_size n) zoom in
-  let display pic = 
+  let display pic zoom = 
     if n == !cur_node then begin
       image#set_pixbuf pic;
       window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (get_idxes n |> String.of_list string_of_int) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
@@ -374,7 +388,7 @@ let set_node_pixbuf size n interp =
       ignore (Glib.Main.iteration true);
       let hadj = scroller#hadjustment 
       and vadj = scroller#vadjustment in
-(*      print_scrollers hadj vadj;*)
+      (*      print_scrollers hadj vadj;*)
       let hmax = hadj#upper -. hadj#page_size
       and vmax = vadj#upper -. vadj#page_size in
       if hadj#value < hmax || vadj#value < vmax then begin
@@ -384,16 +398,18 @@ let set_node_pixbuf size n interp =
 	vadj#set_value vadj#lower;
 	hadj#set_value hadj#lower;
       end;
-(*      print_scrollers hadj vadj;
-*)
+      (*      print_scrollers hadj vadj;
+      *)
     end
   in
+  let zoom = find_zoom size (get_size n) opt.fit in
+  let ar_size = mul_size (get_size n) zoom in
   match n.pixbuf with 
-      Some pb when size_fits (pixbuf_size pb) ar_size -> display pb
+      Some pb when size_fits (pixbuf_size pb) ar_size -> display pb zoom
     | None | Some _ -> 
 	let pb = (scale_raw ar_size ~interp (fresh_pixbuf n)) in
 	set_pb n pb;
-	display pb
+	display pb zoom
 
 let idle_scale node =
   let scaler () =
@@ -409,16 +425,33 @@ let idle_scale node =
  let preload_spread = singleton_task preload_prio 
    (fun () -> idle_scale !cur_node.next)
 
- let show_spread () = 
+ let dump_pages b =
+  let n = ref b.first_page in
+  let act n = match n.pics with One i -> eprintf "(%d)" i.idx | Two (i1,i2) -> eprintf "[%d,%d]" i1.idx i2.idx in
+  while !n != b.last_page do act !n; n := !n.next done; act !n;
+  eprintf "\n"; flush stderr
+
+let show_spread () = 
    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
-   singleton_task show_prio 
-   (fun () -> 
-      (* queue the good rescale *)
-      idle_scale !cur_node;
-      (* do quick rescale - takes care of updating the display *)
-      set_node_pixbuf (view_size()) !cur_node `TILES;
-      preload_spread (); 
-   ) ()
+   let rec show () = 
+     let n = !cur_node in
+     (* queue the good rescale *)
+     idle_scale n;
+     try 
+       (* do quick rescale - takes care of updating the display *)
+       set_node_pixbuf (view_size()) n `TILES;
+       preload_spread (); 
+     with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+       eprintf "Error loading pixmap for page %s\n" (Obj.dump n.pics); 	     flush stderr;
+
+       (match n.book.more_files with 
+	   Many _ -> ignore(gen_nodes n.book ());
+	 | Single (_::_) -> ignore(gen_nodes n.book ()); del_node n
+	 | Single _ -> del_node n ); 
+       cur_node := n.next;
+       show ()
+   in
+   singleton_task show_prio show ()
 
 (* PAGE CHANGING FUNCIONS *)
 let next_page () = !cur_node.next
@@ -426,8 +459,8 @@ let prev_page () = !cur_node.prev
 let first_page () = !cur_node.book.first_page
 let last_page () = !cur_node.book.last_page
   
-let new_page get_page () = 
-  cur_node := get_page (); 
+let new_page page_f () = 
+  cur_node := page_f (); 
   if !cur_node.next.prev != !cur_node then eprintf "Linking failure: %s:%d/%d\n" (!cur_node.book.title) (get_pos !cur_node) (get_pos !cur_node.book.last_page);
   show_spread ()
 
@@ -461,12 +494,6 @@ let find_page i () =
 
 
 (* GROUPING IFSes INTO NODES *)
-let dump_pages b =
-  let n = ref b.first_page in
-  let act n = match n.pics with One i -> Printf.eprintf "(%d)" i.idx | Two (i1,i2) -> Printf.eprintf "[%d,%d]" i1.idx i2.idx in
-  while !n != b.last_page do act !n; n := !n.next done; act !n;
-  Printf.eprintf "\n"
-
 let del_node n = n.next.prev <- n.prev; n.prev.next <- n.next
 
 let merge n = 
@@ -521,7 +548,8 @@ let toggle_fullscreen () =
   if opt.fullscreen then exit_fullscreen () else enter_fullscreen ()
 
 let toggle_manga () =
-  opt.manga <- not opt.manga;
+  opt.manga <- not opt.manga; 
+  reset_pb (); 
   show_spread()
 
 let go_to_page_dialog () =
