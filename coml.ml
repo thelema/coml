@@ -166,7 +166,7 @@ and book = { title: string;
 	     (* all files not yet made into nodes *)
 	     (* [ (title,fn list) ] *)
 	     mutable more_files : future;
-	     mutable page_cache : GdkPixbuf.pixbuf Weak.t;
+	     page_cache : GdkPixbuf.pixbuf Weak.t;
 	   }
 
 let get_page cache idx fn =
@@ -586,7 +586,7 @@ let first_last = ref None
 let toggle_wrap () = 
   opt.wrap <- not opt.wrap;
   match !first_last with 
-      None -> Printf.eprintf "Cannot change wrap\n";
+      None -> eprintf "Cannot change wrap\n";
     | Some (b0,bx) -> 
 	b0.first_page.prev <- if opt.wrap then bx.last_page else b0.first_page;
 	bx.last_page.next <- if opt.wrap then b0.first_page else bx.last_page
@@ -648,12 +648,7 @@ let main () =
 	exit 1
     | Some (n0,nx) -> 
 	new_page (fun () -> n0) ();
-	first_last := Some (n0.book,nx.book);
-	let rec load_book_pages n i = 
-	  ignore(Idle.add ~prio:(gen_page_prio+i) (gen_nodes n.book));
-	  if n != nx then load_book_pages n.next (succ i)
-	in
-	load_book_pages n0 0
+	first_last := Some (n0.book,nx.book)
   end;
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
