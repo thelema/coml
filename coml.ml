@@ -167,6 +167,7 @@ and book = { title: string;
 	     (* [ (title,fn list) ] *)
 	     mutable more_files : future;
 	     page_cache : GdkPixbuf.pixbuf Weak.t;
+	     mutable preloader : Glib.Idle.id option;
 	   }
 
 let get_page cache idx fn =
@@ -238,10 +239,10 @@ match fn with
     | fn when is_archive fn ->
       let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
       (* extract archive to td *)
-      let return_code = extract_archive fn td in
+      let _ = extract_archive fn td in
       (* on quit, remove the extracted archive *)
       at_exit (fun () -> rec_del fn td);
-      if return_code = 0 && Sys.file_exists td then
+      if (* return_code = 0 && *) Sys.file_exists td then
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
 	and title = Filename.basename fn in
@@ -281,6 +282,7 @@ let max_index ?(cn= !cur_node) () = last_idx cn.book.last_page
 let within_book_range ?(cn= !cur_node) x = x >= 0 && x <= max_index ~cn ()
 
 let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
+
 let rec gen_nodes b () = 
   let gen_ifs_lazy c i f = 
     {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
@@ -294,7 +296,7 @@ let rec gen_nodes b () =
 			scaler = None; pics = One (gen_ifs_lazy pc 0 p0);} 
 	  and b1 = {title=title; first_page=n0; last_page=n0; 
 		   more_files = Single (gen_ifses pc rest);
-		   page_cache = pc } in
+		   page_cache = pc; preloader = None } in
 	  let n_prev = b.last_page and n_next = b.last_page.next in
 	  link n_prev n0; link n0 n_next;
 	  ignore(Idle.add ~prio:(gen_page_prio) (gen_nodes b1));
@@ -312,11 +314,14 @@ let rec gen_nodes b () =
 	b.more_files <- Single rest; page (One i1)
     | Single [] -> false
     | Many bks -> 
-	let more = Lazy.force bks in
-	eprintf "generating %d books\n" (List.length more); flush stderr;
-	List.iter make_book more;
-	del_node b.last_page;
-	false
+	if Lazy.lazy_is_val bks then begin
+	  print_endline (Obj.dump bks); false
+	end else
+	  let more = Lazy.force bks in
+	  eprintf "generating %d books\n" (List.length more); flush stderr;
+	  List.iter make_book more;
+	  del_node b.last_page;
+	  false
 
 let make_book lib file =
   let n = 
@@ -326,7 +331,7 @@ let make_book lib file =
 		 scaler = None; pics = One ifs;} 
     and b = {title=file; first_page=n0; last_page=n0; 
 	     more_files = Many (Lazy.lazy_from_fun(fun () ->to_clusters file));
-	     page_cache = Weak.create 1} in
+	     page_cache = Weak.create 1; preloader = None} in
     n0
   in
   let link from_n to_n = to_n.prev <- from_n; from_n.next <- to_n in
@@ -411,12 +416,22 @@ let set_node_pixbuf size n interp =
 	set_pb n pb;
 	display pb zoom
 
-let idle_scale node =
+let rec idle_scale node =
   let scaler () =
     node.scaler <- None;
     (* don't bother scaling if far away from current position *)
-    if near_cur_node node then
-      set_node_pixbuf (view_size ()) node `HYPER;
+    if near_cur_node node then begin
+      try 
+	set_node_pixbuf (view_size ()) node `HYPER;
+      with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
+(*	eprintf "Error loading pixmap for page %s\n" (Obj.dump n.pics);
+	flush stderr; *)
+	(match node.book.more_files with 
+	     Many _ -> ignore(gen_nodes node.book ());
+	   | Single (_::_) -> ignore(gen_nodes node.book ()); del_node node
+	   | Single _ -> del_node node );
+	idle_scale node.next
+    end;
     false
   in
   if node.scaler = None then
@@ -443,12 +458,11 @@ let show_spread () =
        preload_spread (); 
      with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
        eprintf "Error loading pixmap for page %s\n" (Obj.dump n.pics); 	     flush stderr;
-
        (match n.book.more_files with 
 	   Many _ -> ignore(gen_nodes n.book ());
 	 | Single (_::_) -> ignore(gen_nodes n.book ()); del_node n
 	 | Single _ -> del_node n ); 
-       cur_node := n.next;
+       cur_node := if n.next == n then n.prev else n.next;
        show ()
    in
    singleton_task show_prio show ()
@@ -511,7 +525,7 @@ let merge n =
 and split n = 
   match n.pics with
       | Two (i1,i2) -> 
-	  n.pics <- One i1; n.pixbuf <- None; 
+	  n.pics <- One i1; n.pixbuf <- None;
 	  add_node_after n (One i2);
       | One _ -> () 
 
@@ -526,9 +540,9 @@ let toggle_twopage () =
   show_spread ()
 
 let toggle_single_page n =
-  match n.pics with
-    | One _ -> merge n; regroup_pages n.next ()
-    | Two _ -> split n; regroup_pages n.next ()
+  (match n.pics with | One _ -> merge n | Two _ -> split n); 
+  regroup_pages n.next ();
+  show_spread ()
 
 let toggle_cur_twopage () = toggle_single_page !cur_node
 
@@ -578,8 +592,6 @@ let zoom ar_val ar_func =
 let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
 and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Zoom (ar /. 0.95))
 and toggle_zoom () = zoom 1.0 (fun _ -> Fit_both)
-
-
 
 (* gets set to first and last books when they're built *)
 let first_last = ref None
