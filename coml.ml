@@ -85,7 +85,7 @@ let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocati
 
 
 let preload_prio = 130 and show_prio = 115 
-and scale_prio = 140 and gen_page_prio = 150 
+and scale_prio = 140 and gen_page_prio = 120
 and spread_gc_prio = 145 and spread_clean_prio = 100
 
 let failed_load = GdkPixbuf.create 1 1 ()
@@ -273,7 +273,12 @@ let add_node_after n0 ?(book=n0.book) ifsl = (* ugly because of handling final n
     n0.next <- n1
 
 (*TODO: ENDPOINT TESTS? *)
-let del_node n = n.prev.next <- n.next; n.next.prev <- n.prev
+let del_node n = 
+  if n.prev != n && n.next != n then (n.prev.next <- n.next; n.next.prev <- n.prev)
+  else if n.prev == n && n.next == n then failwith "Deleting last node"
+  else if n.prev == n (* n is self-pointing first *) then n.next.prev <- n.next
+  else if n.next == n (* n is self-pointing last *) then n.prev.next <- n.prev
+
 let link from_n to_n = to_n.prev <- from_n; from_n.next <- to_n
 
 let cur_node = ref (Obj.magic 0) (* gets set to a real value before window gets shown *)
@@ -430,17 +435,17 @@ let rec idle_scale node =
 	     Many _ -> ignore(gen_nodes node.book ());
 	   | Single (_::_) -> ignore(gen_nodes node.book ()); del_node node
 	   | Single _ -> del_node node );
-	idle_scale node.next
+	if node.next != node then idle_scale node.next
     end;
     false
   in
   if node.scaler = None then
      node.scaler <- Some (Idle.add ~prio:scale_prio scaler)
 
- let preload_spread = singleton_task preload_prio 
-   (fun () -> idle_scale !cur_node.next)
+let preload_spread = singleton_task preload_prio 
+  (fun () -> idle_scale !cur_node.next)
 
- let dump_pages b =
+let dump_pages b =
   let n = ref b.first_page in
   let act n = match n.pics with One i -> eprintf "(%d)" i.idx | Two (i1,i2) -> eprintf "[%d,%d]" i1.idx i2.idx in
   while !n != b.last_page do act !n; n := !n.next done; act !n;
