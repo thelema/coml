@@ -34,6 +34,11 @@ let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
 open GMain
 open Printf
    
+let usage str = 
+  Printf.printf "%s\n\
+Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
+  exit 1
+
 type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
 type options = { mutable fullscreen: bool;
@@ -55,9 +60,6 @@ let opt = {
   wrap = false;
 }
 
-
-let print_scrollers adj1 adj2 =
-  Printf.printf "scrollers: (%.0f-%.0f)@%.0f PS,PI: %.0f,%0.f \t(%.0f-%.0f)@%.0f PS,PI %.0f,%0.f\n" adj1#lower adj1#upper adj1#value adj1#page_size adj1#page_increment adj2#lower adj2#upper adj2#value adj2#page_size adj2#page_increment; flush stdout
 
 (* GTK WIDGETS *)
 
@@ -211,15 +213,19 @@ let extract_archive file dir =
     | `Sev_zip -> Sys.command (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
 
-let rec rec_del fn path = 
-  Printf.eprintf "Cleaning up %s (from archive %s)\n" path fn;
+let rec rec_del path = 
+  (*  Printf.eprintf "Cleaning up %s\n" path;*)
   let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
-  Sys.readdir path
+  if Sys.file_exists path then begin
+    Sys.readdir path
     |> Array.map (fun fn -> Filename.concat path fn)
     |> Array.iter (fun fn -> if is_directory fn
-		   then rec_del "" fn 
+		   then rec_del fn 
 		   else remove fn);
-    Unix.rmdir path
+    try Unix.rmdir path with _ -> eprintf "***Failed to delete: %s\n" path
+  end
+
+let dirs_to_cleanup = Queue.create ()
 
 let to_clusters filename =   
   let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
@@ -241,7 +247,7 @@ match fn with
       (* extract archive to td *)
       let _ = extract_archive fn td in
       (* on quit, remove the extracted archive *)
-      at_exit (fun () -> rec_del fn td);
+      Queue.add td dirs_to_cleanup;
       if (* return_code = 0 && *) Sys.file_exists td then
 	let contents = files_in td in
 	let dirs,files = List.partition is_directory contents
@@ -320,12 +326,15 @@ let rec gen_nodes b () =
     | Single [] -> false
     | Many bks -> 
 	if Lazy.lazy_is_val bks then begin
-	  print_endline (Obj.dump bks); false
+	  (* print_endline "Already generated: " ^ (Obj.dump bks); *)
+	  false
 	end else
 	  let more = Lazy.force bks in
 	  eprintf "generating %d books\n" (List.length more); flush stderr;
 	  List.iter make_book more;
-	  del_node b.last_page;
+	  ( try 
+	    del_node b.last_page;
+	  with Failure _ -> usage "Can't expand any books" );
 	  false
 
 let make_book lib file =
@@ -462,7 +471,9 @@ let show_spread () =
        set_node_pixbuf (view_size()) n `TILES;
        preload_spread (); 
      with GdkPixbuf.GdkPixbufError(_,msg) | Glib.GError msg -> 
-       eprintf "Error loading pixmap for page %s\n" (Obj.dump n.pics); 	     flush stderr;
+(*       eprintf "Error loading pixmap for page %s: %s\n" 
+	 (Obj.dump n.pics) (Obj.dump n.book.more_files);
+       flush stderr;*)
        (match n.book.more_files with 
 	   Many _ -> ignore(gen_nodes n.book ());
 	 | Single (_::_) -> ignore(gen_nodes n.book ()); del_node n
@@ -477,6 +488,8 @@ let next_page () = !cur_node.next
 let prev_page () = !cur_node.prev
 let first_page () = !cur_node.book.first_page
 let last_page () = !cur_node.book.last_page
+let next_book () = !cur_node.book.last_page.next
+let prev_book () = !cur_node.book.first_page.prev
   
 let new_page page_f () = 
   cur_node := page_f (); 
@@ -588,15 +601,19 @@ let go_to_page_dialog () =
     | `DELETE_EVENT | `CANCEL -> w#destroy ()
     | `OK -> on_ok ()
 
-let zoom ar_val ar_func = 
-  opt.fit <-( match opt.fit with
-		    Fit_both | Fit_w | Fit_h -> Zoom ar_val
-		  | Zoom ar -> ar_func ar);
+(* type scaling = Fit_w | Fit_h | Fit_both | Zoom of float *)
+let zoom ar_func = 
+  let cur_zoom = find_zoom (view_size ()) (get_size (!cur_node)) opt.fit in
+  opt.fit <- (ar_func cur_zoom);
   show_spread()
 
-let zoom_out () = zoom 0.95 (fun ar -> Zoom (ar *. 0.95))
-and zoom_in () = zoom (1.0 /. 0.95) (fun ar -> Zoom (ar /. 0.95))
-and toggle_zoom () = zoom 1.0 (fun _ -> Fit_both)
+let zoom_out () = zoom (fun ar -> Zoom (ar *. 0.95))
+and zoom_in () = zoom (fun ar -> Zoom (ar /. 0.95))
+and zoom_full () = zoom (fun _ -> Zoom 1.)
+and zoom_height () = zoom (fun _ -> Fit_h)
+and zoom_width () = zoom (fun _ -> Fit_w)
+and zoom_both () = zoom (fun _ -> Fit_both)
+
 
 (* gets set to first and last books when they're built *)
 let first_last = ref None
@@ -618,11 +635,13 @@ let actions = [(_q, Main.quit);
 	    (_space, magic_next);
 	    (_f, toggle_fullscreen); (_F11, toggle_fullscreen);
 	    (_Escape, exit_fullscreen); (_t, toggle_twopage);
-	    (_m, toggle_manga); (_z, toggle_zoom);
-	    (_minus, zoom_out); (_plus, zoom_in); (_equal, zoom_in);
+	    (_m, toggle_manga); (_s, zoom_both);
+	    (_w, zoom_width); (_h, zoom_height);
+	    (_minus, zoom_out); (_plus, zoom_in); (_equal, zoom_full);
 (*	    (_l, (fun () -> load_cache (List.fold_left min 0 !image_idxes)));*)
 	    (_w, toggle_wrap); (_1, toggle_cur_twopage);
-	    (_Page_Up, new_page first_page); (_Page_Down, new_page last_page);
+	    (_Home, new_page first_page); (_End, new_page last_page);
+	    (_Page_Up, new_page prev_book); (_Page_Down, new_page next_book);
 	    (_g, go_to_page_dialog);
 	    (_o, (fun () -> ignore (idxes_on_disp ())));
 	   ]
@@ -660,13 +679,13 @@ let main () =
   let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
   
   begin match build_books arg_list with
-      None -> 
-	Printf.printf "No books found\nUsage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" Sys.argv.(0);
-	exit 1
+      None -> usage "No books found"
     | Some (n0,nx) -> 
 	new_page (fun () -> n0) ();
 	first_last := Some (n0.book,nx.book)
   end;
+
+  at_exit (fun () -> Queue.iter rec_del dirs_to_cleanup);
 
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
   and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
