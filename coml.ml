@@ -205,13 +205,22 @@ let archive_type fn = suffix_type archive_suffixes fn
 let is_archive fn = any_suffix archive_suffixes fn
 let is_picture fn = any_suffix pic_suffixes fn
 
-let extract_archive file dir =
-  Printf.eprintf "Extracting %s to %s\n" file dir; flush stderr;
+let extract_command file dir = 
   match archive_type file with
-    | `Rar -> Sys.command (Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir)
-    | `Zip -> Sys.command (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
-    | `Sev_zip -> Sys.command (Printf.sprintf "7za -o%s x \"%s\"" dir file)
+      `Rar -> (Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir)
+    | `Zip -> (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
+    | `Sev_zip -> (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
+
+let dirs_to_cleanup = Queue.create ()
+
+let extract_archive file =
+  let td_suff = (Printf.sprintf "coml-%d" (Random.bits ())) in
+  let td = Filename.concat Filename.temp_dir_name td_suff in
+  Printf.eprintf "Extracting %s to %s\n" file td; flush stderr;
+  let _retval = Sys.command (extract_command file td) in
+  Queue.add td dirs_to_cleanup;
+  td
 
 let rec rec_del path = 
   (*  Printf.eprintf "Cleaning up %s\n" path;*)
@@ -225,8 +234,6 @@ let rec rec_del path =
     try Unix.rmdir path with _ -> eprintf "***Failed to delete: %s\n" path
   end
 
-let dirs_to_cleanup = Queue.create ()
-
 let to_clusters filename =   
   let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
   let ht = Hashtbl.create 50 in (* title -> filename  -- multiple bindings *)
@@ -235,34 +242,27 @@ let to_clusters filename =
     List.iter (Hashtbl.add ht t) fs; 
     if fs <> [] && not (List.mem t !titles) then titles := t :: !titles;
   in
-  let rec expand_list fn = printf "Expanding: %s\n" fn;
-match fn with 
-    | fn when not (Sys.file_exists fn) -> ()
-    | fn when is_directory fn ->
-	let fn = String.chomp ~char:'/' fn in
-	let title = Filename.basename fn in
-	files_in fn |> List.filter is_picture |> add_entries title;
-    | fn when is_archive fn ->
-      let td = Filename.concat Filename.temp_dir_name (Printf.sprintf "coml-%d" (Random.bits ())) in
-      (* extract archive to td *)
-      let _ = extract_archive fn td in
-      (* on quit, remove the extracted archive *)
-      Queue.add td dirs_to_cleanup;
-      if (* return_code = 0 && *) Sys.file_exists td then
-	let contents = files_in td in
-	let dirs,files = List.partition is_directory contents
-	and title = Filename.basename fn in
-	files |> List.filter is_picture |> add_entries title;
-	List.iter expand_list dirs
-    | fn when is_picture fn ->
-	add_entries (Filename.basename fn) [fn];
-    | _ -> (* garbage file *) () 
+  let rec expand_list fn ?(title=fn) () = printf "Expanding: %s\n" fn;
+    if not (Sys.file_exists fn) then ()
+    else if is_directory fn then 
+      let fn = String.chomp ~char:'/' fn in (* remove trailing / *)
+      let contents = files_in fn in
+      let dirs,files = List.partition is_directory contents
+      and title = Filename.basename fn in
+      files |> List.filter is_picture |> add_entries title;
+      List.iter (fun fn -> expand_list fn ()) dirs
+    else if is_archive fn then
+      let td = extract_archive fn in
+      expand_list td ~title:fn ()
+    else if is_picture fn then
+      add_entries (Filename.basename fn) [fn]
+    else ()
   in
   let get_group acc t = 
     (* TODO: schwarzian transform *)
     let files = Hashtbl.find_all ht t |> List.sort numeric_compare in 
     (t, files) :: acc in
-  expand_list filename;
+  expand_list filename ();
   List.fold_left get_group [] !titles
 
 let add_node_after n0 ?(book=n0.book) ifsl = (* ugly because of handling final node's pointer to self *)
@@ -332,9 +332,8 @@ let rec gen_nodes b () =
 	  let more = Lazy.force bks in
 	  eprintf "generating %d books\n" (List.length more); flush stderr;
 	  List.iter make_book more;
-	  ( try 
-	    del_node b.last_page;
-	  with Failure _ -> usage "Can't expand any books" );
+	  ( try del_node b.last_page;
+	    with Failure _ -> usage "Can't expand any books" );
 	  false
 
 let make_book lib file =
