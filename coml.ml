@@ -242,7 +242,8 @@ let to_clusters filename =
     List.iter (Hashtbl.add ht t) fs; 
     if fs <> [] && not (List.mem t !titles) then titles := t :: !titles;
   in
-  let rec expand_list fn ?(title=fn) () = printf "Expanding: %s\n" fn;
+  let rec expand_list fn ?(title=fn) () = 
+(*printf "Expanding: %s\n" fn;*)
     if not (Sys.file_exists fn) then ()
     else if is_directory fn then 
       let fn = String.chomp ~char:'/' fn in (* remove trailing / *)
@@ -265,20 +266,14 @@ let to_clusters filename =
   expand_list filename ();
   List.fold_left get_group [] !titles
 
-let add_node_after n0 ?(book=n0.book) ifsl = (* ugly because of handling final node's pointer to self *)
-  let n2 = n0.next in
-  if n2.prev == n0 then 
-    let n1 = {next = n2; prev=n0; book=book; 
-	      pixbuf = None; scaler = None; 
-	      pics = ifsl;} in
-    n0.next <- n1; n2.prev <- n1
-  else 
-    let rec n1 = {next = n1; prev=n0; book=book; 
-	      pixbuf = None; scaler = None; 
-	      pics = ifsl;} in
-    n0.next <- n1
+let add_node_after n0 ?(book=n0.book) ifsl = 
+(* ugly because of handling final node's pointer to self *)
+  let rec n1 = {next = n1; prev=n0; book=book; 
+		pixbuf = None; scaler = None; 
+		pics = ifsl;} in
+  if n0.next != n0 then (n1.next <- n0.next; n1.next.prev <- n1);
+  n0.next <- n1
 
-(*TODO: ENDPOINT TESTS? *)
 let del_node n = 
   if n.prev != n && n.next != n then (n.prev.next <- n.next; n.next.prev <- n.prev)
   else if n.prev == n && n.next == n then failwith "Deleting last node"
