@@ -148,11 +148,15 @@ let numeric_compare s1 s2 =
       Int64.compare n1 n2
     end
 
+module NumberString = struct type t = string let compare = numeric_compare end
+module NumStringSet = Set.Make(NumberString)
+module NumStringMap = Map.Make(NumberString)
+
 type ifs = {idx : int; filename: string; size: (int * int) Lazy.t}
 
 type spread = One of ifs | Two of ifs * ifs
 
-type future = | Many of (string * string list) list Lazy.t 
+type future = | Many of NumStringSet.t NumStringMap.t Lazy.t 
 	      | Single of ifs list
 
 type node = { mutable next : node; 
@@ -212,18 +216,8 @@ let extract_command file dir =
     | `Sev_zip -> (Printf.sprintf "7za -o%s x \"%s\"" dir file)
     | `None -> assert false
 
-let dirs_to_cleanup = Queue.create ()
-
-let extract_archive file =
-  let td_suff = (Printf.sprintf "coml-%d" (Random.bits ())) in
-  let td = Filename.concat Filename.temp_dir_name td_suff in
-  Printf.eprintf "Extracting %s to %s\n" file td; flush stderr;
-  let _retval = Sys.command (extract_command file td) in
-  Queue.add td dirs_to_cleanup;
-  td
-
 let rec rec_del path = 
-  (*  Printf.eprintf "Cleaning up %s\n" path;*)
+  Printf.eprintf "Cleaning up %s\n" path;
   let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
   if Sys.file_exists path then begin
     Sys.readdir path
@@ -234,44 +228,55 @@ let rec rec_del path =
     try Unix.rmdir path with _ -> eprintf "***Failed to delete: %s\n" path
   end
 
+(*let incremental_del = TODO IMPLEMENT non-blocking delete*)
+
+let dirs_to_cleanup = Queue.create ()
+
+let extract_archive file =
+  let td_suff = (Printf.sprintf "coml-%d" (Random.bits ())) in
+  let td = Filename.concat Filename.temp_dir_name td_suff in
+  Printf.eprintf "Extracting %s to %s\n" file td; flush stderr;
+  let _retval = Sys.command (extract_command file td) in
+  Queue.add td dirs_to_cleanup;
+(*  if Queue.length dirs_to_cleanup > 5 then
+    ignore(Idle.add ~prio:(spread_gc_prio) 
+	     (fun () -> rec_del (Queue.take dirs_to_cleanup); false)); *)
+  td
+
 let to_clusters filename =   
   let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
-  let ht = Hashtbl.create 50 in (* title -> filename  -- multiple bindings *)
-  let titles = ref [] in (* title set - single entry per title *)
-  let add_entries t fs = 
-    List.iter (Hashtbl.add ht t) fs; 
-    if fs <> [] && not (List.mem t !titles) then titles := t :: !titles;
+  (* map is title -> NumStringSet.t *)
+  let add_entries t map fs = 
+    let s0 = try NumStringMap.find t map 
+             with Not_found -> NumStringSet.empty in
+    let s1 = List.fold_left (fun s fn -> NumStringSet.add fn s) s0 fs in
+    NumStringMap.add t s1 map
   in
-  let rec expand_list fn ?(title=fn) () = 
+  let rec expand_list fn ?(title=fn) map = 
 (*printf "Expanding: %s\n" fn;*)
-    if not (Sys.file_exists fn) then ()
+    if not (Sys.file_exists fn) then map
     else if is_directory fn then 
       let fn = String.chomp ~char:'/' fn in (* remove trailing / *)
       let contents = files_in fn in
       let dirs,files = List.partition is_directory contents
       and title = Filename.basename fn in
-      files |> List.filter is_picture |> add_entries title;
-      List.iter (fun fn -> expand_list fn ()) dirs
+      let map2 = files |> List.filter is_picture |> add_entries title map in
+      List.fold_left (fun map fn -> expand_list fn map) map2 dirs
     else if is_archive fn then
       let td = extract_archive fn in
-      expand_list td ~title:fn ()
+      expand_list td ~title:fn map
     else if is_picture fn then
-      add_entries (Filename.basename fn) [fn]
-    else ()
+      add_entries (Filename.basename fn) map [fn]
+    else map
   in
-  let get_group acc t = 
-    (* TODO: schwarzian transform *)
-    let files = Hashtbl.find_all ht t |> List.sort numeric_compare in 
-    (t, files) :: acc in
-  expand_list filename ();
-  List.fold_left get_group [] !titles
+  expand_list filename NumStringMap.empty
 
 let add_node_after n0 ?(book=n0.book) ifsl = 
-(* ugly because of handling final node's pointer to self *)
   let rec n1 = {next = n1; prev=n0; book=book; 
 		pixbuf = None; scaler = None; 
 		pics = ifsl;} in
-  if n0.next != n0 then (n1.next <- n0.next; n1.next.prev <- n1);
+  (* If the last  node doesn't point to itself, fix up the pointers *)  
+  if n0.next != n0 then (n1.next <- n0.next; n0.next.prev <- n1);
   n0.next <- n1
 
 let del_node n = 
@@ -293,11 +298,14 @@ let rec gen_nodes b () =
   let gen_ifs_lazy c i f = 
     {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
   let gen_ifses c l = List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
-  let make_book (title, files) = 
-    eprintf "Making book %s with %d pages\n" title (List.length files); flush stderr;
+  let make_book title files = 
+    let files = NumStringSet.elements files in
+    let count = List.length files in
+    eprintf "Making book %s with %d pages\n" 
+      title count; flush stderr;
     match files with [] -> ()
       | p0 :: rest -> 
-	  let pc = Weak.create (1+List.length rest) in
+	  let pc = Weak.create count in
 	  let rec n0 = {next = n0; prev = n0; book = b1; pixbuf = None;
 			scaler = None; pics = One (gen_ifs_lazy pc 0 p0);} 
 	  and b1 = {title=title; first_page=n0; last_page=n0; 
@@ -324,9 +332,10 @@ let rec gen_nodes b () =
 	  (* print_endline "Already generated: " ^ (Obj.dump bks); *)
 	  false
 	end else
-	  let more = Lazy.force bks in
-	  eprintf "generating %d books\n" (List.length more); flush stderr;
-	  List.iter make_book more;
+	  let map = Lazy.force bks in
+	  let count = NumStringMap.fold (fun _ _ -> succ) map 0 in
+	  eprintf "generating %d books\n" count; flush stderr;
+	  NumStringMap.iter make_book map;
 	  ( try del_node b.last_page;
 	    with Failure _ -> usage "Can't expand any books" );
 	  false
@@ -514,8 +523,8 @@ let find_page i () =
   assert (within_book_range i);
   let not_pg_i n = not (List.mem i (get_idxes n)) in
   (* search in correct direction *)
-  let next = if get_pos !cur_node < i then next_page else prev_page in
-  while not_pg_i !cur_node do cur_node := next() done;
+  let move = if get_pos !cur_node < i then next_page else prev_page in
+  while not_pg_i !cur_node do cur_node := move () done;
   show_spread ()
 
 
