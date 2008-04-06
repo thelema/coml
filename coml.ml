@@ -496,26 +496,28 @@ let prev_book () = !cur_node.book.first_page.prev
   
 let new_page page_f () = 
   cur_node := page_f (); 
-  if !cur_node.next.prev != !cur_node then eprintf "Linking failure: %s:%d/%d\n" (!cur_node.book.title) (get_pos !cur_node) (get_pos !cur_node.book.last_page);
+  if not (!cur_node.next == !cur_node || 
+	    !cur_node.next.prev == !cur_node) 
+  then eprintf "Linking failure: %s:%d/%d\n" (!cur_node.book.title) 
+    (get_pos !cur_node) (get_pos !cur_node.book.last_page);
   show_spread ()
+
 
 let magic_next () = 
   let hadj = scroller#hadjustment and vadj = scroller#vadjustment in
-  let vupper = vadj#upper -. vadj#page_size
-  and hupper = hadj#upper -. hadj#page_size in
-(*  print_scrollers hadj vadj; *)
-  if vadj#value < vupper -. 1. then begin
-(*    Printf.printf "V-step down %.1f < %.1f - 1\n"vadj#value vupper;*)
-    vadj#set_value (min (vadj#value +. vadj#page_increment) vupper);
-(*    vadj#emit changed TODO: HOW?*)
-  end else if (not opt.manga) && hadj#value < hupper -. 1. then begin
-(*    Printf.printf "H-step right %.1f < %.1f - 1\n" hadj#value hupper;*)
-    if vadj#value != 0. then vadj#set_value 0.;
-    hadj#set_value (min (hadj#value +. hadj#page_increment) hupper);
-  end else if opt.manga && hadj#value > 1. then begin
-(*    Printf.printf "H-step left %.1f > 1\n" hadj#value;*)
-    if vadj#value != 0. then vadj#set_value 0.;
-    hadj#set_value (max (hadj#value -. hadj#page_increment) 0.);
+  let set_clamp adj new_val = 
+    let clamped_val = max 0. (min (adj#upper -. adj#page_size) new_val) in
+    adj#set_value clamped_val in
+  let scroll_top () = vadj#set_value 0. in
+  if vadj#value < vadj#upper -. vadj#page_size then 
+    set_clamp vadj (vadj#value +. vadj#page_increment)
+  else if opt.manga && hadj#value > 0. then begin
+    if vadj#value != 0. then scroll_top ();
+    set_clamp hadj (hadj#value -. hadj#page_increment)
+  end else if (not opt.manga) && 
+    hadj#value < hadj#upper -. hadj#page_size then begin
+    if vadj#value != 0. then scroll_top ();
+    set_clamp hadj (hadj#value +. hadj#page_increment)
   end else
     new_page next_page ()
     
