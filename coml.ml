@@ -217,16 +217,21 @@ let extract_command file dir =
     | `None -> assert false
 
 let rec rec_del path = 
-  Printf.eprintf "Cleaning up %s\n" path;
-  let remove fn = (*Printf.eprintf "Removing: %s"*) Unix.unlink fn in
+  Printf.eprintf "%s, " path;
+  let remove fn = if is_directory fn then rec_del fn else Unix.unlink fn in
   if Sys.file_exists path then begin
     Sys.readdir path
-    |> Array.map (fun fn -> Filename.concat path fn)
-    |> Array.iter (fun fn -> if is_directory fn
-		   then rec_del fn 
-		   else remove fn);
+    |> Array.map (Filename.concat path)
+    |> Array.iter remove;
     try Unix.rmdir path with _ -> eprintf "***Failed to delete: %s\n" path
   end
+
+let rec_del path = 
+  Printf.eprintf "Cleaning up ";
+  rec_del path;
+  Printf.eprintf "done.\n";
+  flush stderr
+
 
 (*let incremental_del = TODO IMPLEMENT non-blocking delete*)
 
@@ -632,6 +637,7 @@ let toggle_wrap () =
 	  
 let quit () = 
   window#misc#hide ();
+  Queue.iter rec_del dirs_to_cleanup;  
   Main.quit ()
 
 (* key bindings as a list of pairs  (key, function) *)  
@@ -694,17 +700,15 @@ let main () =
 	first_last := Some (n0.book,nx.book)
   end;
 
-  at_exit (fun () -> Queue.iter rec_del dirs_to_cleanup);
-
   let prev = GButton.button ~stock:`GO_BACK ~packing:bbox#pack ()
   and next = GButton.button ~stock:`GO_FORWARD ~packing:bbox#pack () in
   ignore (prev#connect#clicked ~callback:(new_page prev_page));
   ignore (next#connect#clicked ~callback:(new_page next_page));
 
   let close = GButton.button ~stock:`CLOSE ~packing:bbox#pack () in
-  ignore (close#connect#clicked ~callback:Main.quit);
+  ignore (close#connect#clicked ~callback:quit);
 
-  ignore (window#connect#destroy ~callback:Main.quit);
+  ignore (window#connect#destroy ~callback:quit);
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
   
