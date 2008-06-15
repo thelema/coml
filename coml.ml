@@ -555,7 +555,7 @@ and split n =
 let regroup_pages n0 () = 
   let n = ref n0 in
   let act = if opt.twopage then merge else split in
-  while get_pos !n <= get_pos !n.next do act !n; n := !n.next done; act !n
+  while get_pos !n < get_pos !n.next do act !n; n := !n.next done; act !n
 
 let toggle_twopage () =
   opt.twopage <- not opt.twopage;
@@ -630,10 +630,14 @@ let toggle_wrap () =
 	b0.first_page.prev <- if opt.wrap then bx.last_page else b0.first_page;
 	bx.last_page.next <- if opt.wrap then b0.first_page else bx.last_page
 	  
+let quit () = 
+  window#misc#hide ();
+  Main.quit ()
+
 (* key bindings as a list of pairs  (key, function) *)  
 open GdkKeysyms
 
-let actions = [(_q, Main.quit);
+let actions = [(_q, quit);
 	    (_Left, new_page prev_page); 
 	    (_Up, new_page prev_page); (_BackSpace, new_page prev_page);
 	    (_Right, new_page next_page); (_Down, new_page next_page); 
