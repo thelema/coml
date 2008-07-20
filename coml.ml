@@ -194,7 +194,7 @@ let get_size s = match s.pics with One i -> get_isize i
 let is_vert ifs = let w0,h0 = get_isize ifs in w0 < h0
 
 
-let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip)]
+let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip); ("lzh", `Lha)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
   
 let fold_sufchecks fn set_acc init suf_list = 
@@ -211,9 +211,10 @@ let is_picture fn = any_suffix pic_suffixes fn
 
 let extract_command file dir = 
   match archive_type file with
-      `Rar -> (Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir)
-    | `Zip -> (Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir)
-    | `Sev_zip -> (Printf.sprintf "7za -o%s x \"%s\"" dir file)
+      `Rar -> Printf.sprintf "unrar x \"%s\" \"%s\"/" file dir
+    | `Zip -> Printf.sprintf "unzip \"%s\" -d \"%s\"" file dir
+    | `Sev_zip -> Printf.sprintf "7za -o%s x \"%s\"" dir file
+    | `Lha -> Unix.mkdir dir 0o700; Printf.sprintf "lha xw=\"%s\" \"%s\"" dir file
     | `None -> assert false
 
 let rec rec_del path = 
