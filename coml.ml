@@ -19,18 +19,20 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
-   
-   Compile with community-ocaml 
-   (http://repo.or.cz/w/ocaml.git branch community/trunk)
-   
    % make
    
  *)
+open Batteries (* requires batteries *)
+
+let _ = GtkMain.Main.init ()
 
 let (|>) x f = f x
 
 let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
-   
+let pretty_print string_of l =
+  "["^String.concat "; " (List.map string_of l)^"]"
+let string_of_int_list = pretty_print string_of_int
+ 
 open GMain
 open Printf
    
@@ -156,8 +158,8 @@ type ifs = {idx : int; filename: string; size: (int * int) Lazy.t}
 
 type spread = One of ifs | Two of ifs * ifs
 
-type future = | Many of NumStringSet.t NumStringMap.t Lazy.t 
-	      | Single of ifs list
+type future = | Group of NumStringSet.t NumStringMap.t Lazy.t 
+	      | Book of ifs list
 
 type node = { mutable next : node; 
 	      mutable prev: node;
@@ -262,7 +264,7 @@ let to_clusters filename =
 (*printf "Expanding: %s\n" fn;*)
     if not (Sys.file_exists fn) then map
     else if is_directory fn then 
-      let fn = String.chomp ~char:'/' fn in (* remove trailing / *)
+(*      let fn = Data.Text.String.chomp ~char:'/' fn in*) (* remove trailing / if exists *)
       let contents = files_in fn in
       let dirs,files = List.partition is_directory contents
       and title = Filename.basename fn in
@@ -303,7 +305,7 @@ let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
 let rec gen_nodes b () = 
   let gen_ifs_lazy c i f = 
     {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
-  let gen_ifses c l = List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
+  let gen_ifses c l = Data.Containers.Persistent.List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
   let make_book title files = 
     let files = NumStringSet.elements files in
     let count = List.length files in
@@ -315,7 +317,7 @@ let rec gen_nodes b () =
 	  let rec n0 = {next = n0; prev = n0; book = b1; pixbuf = None;
 			scaler = None; pics = One (gen_ifs_lazy pc 0 p0);} 
 	  and b1 = {title=title; first_page=n0; last_page=n0; 
-		   more_files = Single (gen_ifses pc rest);
+		   more_files = Book (gen_ifses pc rest);
 		   page_cache = pc; preloader = None } in
 	  let n_prev = b.last_page and n_next = b.last_page.next in
 	  link n_prev n0; link n0 n_next;
@@ -324,23 +326,23 @@ let rec gen_nodes b () =
   let page ifsl = 
     add_node_after b.last_page ifsl; 
     b.last_page <- b.last_page.next;
-    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
+    window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> string_of_int_list) (max_index ~cn:!cur_node ()) !cur_node.book.title);
     true 
   and can_join ifs1 ifs2 = opt.twopage && is_vert ifs1 && is_vert ifs2 in
   match b.more_files with
-    | Single(i1 :: i2 :: rest) when can_join i1 i2 -> 
-	b.more_files <- Single rest; page (Two (i1,i2))
-    | Single(i1 :: rest) (* can't join with next *)-> 
-	b.more_files <- Single rest; page (One i1)
-    | Single [] -> false
-    | Many bks -> 
-	if Lazy.lazy_is_val bks then begin
-	  (* print_endline "Already generated: " ^ (Obj.dump bks); *)
+    | Book (i1 :: i2 :: rest) when can_join i1 i2 -> 
+	b.more_files <- Book rest; page (Two (i1,i2))
+    | Book (i1 :: rest) (* can't join with next *)-> 
+	b.more_files <- Book rest; page (One i1)
+    | Book [] -> false (* done generating this book *)
+    | Group bks -> 
+	if Lazy.lazy_is_val bks then begin (* already generated this book *)
+	  print_endline ("Already generated: " ^ (dump bks));
 	  false
 	end else
 	  let map = Lazy.force bks in
-	  let count = NumStringMap.fold (fun _ _ -> succ) map 0 in
-	  eprintf "generating %d books\n" count; flush stderr;
+(*	  let count = NumStringMap.fold (fun _ _ -> succ) map 0 in
+	  eprintf "generating %d books\n" count; flush stderr;*)
 	  NumStringMap.iter make_book map;
 	  ( try del_node b.last_page;
 	    with Failure _ -> usage "Can't expand any books" );
@@ -353,7 +355,7 @@ let make_book lib file =
     let rec n0 = {next = n0; prev = n0; book = b; pixbuf = None;
 		 scaler = None; pics = One ifs;} 
     and b = {title=file; first_page=n0; last_page=n0; 
-	     more_files = Many (Lazy.lazy_from_fun(fun () ->to_clusters file));
+	     more_files = Group (Lazy.lazy_from_fun(fun () ->to_clusters file));
 	     page_cache = Weak.create 1; preloader = None} in
     n0
   in
@@ -411,7 +413,7 @@ let set_node_pixbuf size n interp =
   let display pic zoom = 
     if n == !cur_node then begin
       image#set_pixbuf pic;
-      window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (get_idxes n |> String.of_list string_of_int) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
+      window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (get_idxes n |> string_of_int_list) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
       (* draw the screen *)
       ignore (Glib.Main.iteration true);
       let hadj = scroller#hadjustment 
@@ -450,9 +452,9 @@ let rec idle_scale node =
 (*	eprintf "Error loading pixmap for page %s\n" (Obj.dump n.pics);
 	flush stderr; *)
 	(match node.book.more_files with 
-	     Many _ -> ignore(gen_nodes node.book ());
-	   | Single (_::_) -> ignore(gen_nodes node.book ()); del_node node
-	   | Single _ -> del_node node );
+	     Group _ -> ignore(gen_nodes node.book ());
+	   | Book (_::_) -> ignore(gen_nodes node.book ()); del_node node
+	   | Book _ -> del_node node );
 	if node.next != node then idle_scale node.next
     end;
     false
@@ -470,7 +472,7 @@ let dump_pages b =
   eprintf "\n"; flush stderr
 
 let show_spread () = 
-   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> String.of_list string_of_int) (max_index ~cn:!cur_node ()) !cur_node.book.title);
+   window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> string_of_int_list) (max_index ~cn:!cur_node ()) !cur_node.book.title);
    let rec show () = 
      let n = !cur_node in
      (* queue the good rescale *)
@@ -483,10 +485,11 @@ let show_spread () =
 (*       eprintf "Error loading pixmap for page %s: %s\n" 
 	 (Obj.dump n.pics) (Obj.dump n.book.more_files);
        flush stderr;*)
-       (match n.book.more_files with 
-	   Many _ -> ignore(gen_nodes n.book ());
-	 | Single (_::_) -> ignore(gen_nodes n.book ()); del_node n
-	 | Single _ -> del_node n ); 
+       (* delete bad node, after processing any lazy pages from its book *)
+       (match n.book.more_files with  
+	   Group _ -> ignore(gen_nodes n.book ());
+	 | Book (_::_) -> ignore(gen_nodes n.book ()); del_node n
+	 | Book [] -> del_node n ); 
        cur_node := if n.next == n then n.prev else n.next;
        show ()
    in
