@@ -1,3 +1,5 @@
+
+
 (* coml - LablGTK-based Comic-book (CBR,CBZ) viewer 
    
    (original dispimg source) Written by Shawn Wagner (shawnw@speakeasy.org) 
@@ -23,25 +25,24 @@
    
  *)
 open Batteries (* requires batteries *)
+open Standard, Printf, Data.Persistent, System
+open GMain
+
+TYPE_CONV_PATH "Coml"
 
 let _ = GtkMain.Main.init ()
 
-let (|>) x f = f x
-
-let is_directory fn = (Unix.lstat fn).Unix.st_kind = Unix.S_DIR
 let pretty_print string_of l =
   "["^String.concat "; " (List.map string_of l)^"]"
-let string_of_int_list = pretty_print string_of_int
+let string_of_int_list = List.print_string Int.print 
  
-open GMain
-open Printf
    
 let usage str = 
   Printf.printf "%s\n\
 Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
   exit 1
 
-type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
+type scaling = Fit_w | Fit_h | Fit_both | Zoom of float with sexp
 
 type options = { mutable fullscreen: bool;
 		 mutable twopage: bool;
@@ -50,8 +51,8 @@ type options = { mutable fullscreen: bool;
 		 mutable fit: scaling;
 		 mutable zoom_enlarge: bool;
 		 mutable wrap : bool;
-	       }
-(* TODO: save and load options *)
+	       } with sexp
+
 let opt = { 
   fullscreen = false; 
   twopage = true; 
@@ -62,6 +63,7 @@ let opt = {
   wrap = false;
 }
 
+let save_opts () = print_endline (sexp_of_options opt |> Sexplib.Sexp.to_string_hum)
 
 (* GTK WIDGETS *)
 
@@ -194,7 +196,7 @@ let get_isize i = Lazy.force i.size
 let get_size s = match s.pics with One i -> get_isize i 
   | Two(i1,i2) ->  merge_size (get_isize i1) (get_isize i2)
 let is_vert ifs = let w0,h0 = get_isize ifs in w0 < h0
-
+let get_width ifs = snd (get_isize ifs)
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip); ("lzh", `Lha)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -221,7 +223,7 @@ let extract_command file dir =
 
 let rec rec_del path = 
   Printf.eprintf "%s, " path;
-  let remove fn = if is_directory fn then rec_del fn else Unix.unlink fn in
+  let remove fn = if Unix.is_directory fn then rec_del fn else Unix.unlink fn in
   if Sys.file_exists path then begin
     Sys.readdir path
     |> Array.map (Filename.concat path)
@@ -305,7 +307,7 @@ let near_cur_node n = abs (last_idx !cur_node - first_idx n) < 4
 let rec gen_nodes b () = 
   let gen_ifs_lazy c i f = 
     {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
-  let gen_ifses c l = Data.Containers.Persistent.List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
+  let gen_ifses c l = List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
   let make_book title files = 
     let files = NumStringSet.elements files in
     let count = List.length files in
@@ -328,7 +330,10 @@ let rec gen_nodes b () =
     b.last_page <- b.last_page.next;
     window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s" (get_idxes !cur_node |> string_of_int_list) (max_index ~cn:!cur_node ()) !cur_node.book.title);
     true 
-  and can_join ifs1 ifs2 = opt.twopage && is_vert ifs1 && is_vert ifs2 in
+  and can_join ifs1 ifs2 = opt.twopage && 
+    ( (is_vert ifs1 && is_vert ifs2)
+      || (get_width ifs1 + get_width ifs2 < snd (view_size ()))
+    ) in
   match b.more_files with
     | Book (i1 :: i2 :: rest) when can_join i1 i2 -> 
 	b.more_files <- Book rest; page (Two (i1,i2))
@@ -641,7 +646,8 @@ let toggle_wrap () =
 	  
 let quit () = 
   window#misc#hide ();
-  Queue.iter rec_del dirs_to_cleanup;  
+  save_opts ();
+  Queue.iter rec_del dirs_to_cleanup;
   Main.quit ()
 
 (* key bindings as a list of pairs  (key, function) *)  
