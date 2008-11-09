@@ -28,6 +28,8 @@ open Batteries (* requires batteries *)
 open Standard, Printf, Data.Persistent, System
 open GMain
 
+
+
 TYPE_CONV_PATH "Coml"
 
 let _ = GtkMain.Main.init ()
@@ -223,7 +225,7 @@ let extract_command file dir =
 
 let rec rec_del path = 
   Printf.eprintf "%s, " path;
-  let remove fn = if Unix.is_directory fn then rec_del fn else Unix.unlink fn in
+  let remove fn = if Sys.is_directory fn then rec_del fn else Unix.unlink fn in
   if Sys.file_exists path then begin
     Sys.readdir path
     |> Array.map (Filename.concat path)
@@ -265,10 +267,10 @@ let to_clusters filename =
   let rec expand_list fn ?(title=fn) map = 
 (*printf "Expanding: %s\n" fn;*)
     if not (Sys.file_exists fn) then map
-    else if is_directory fn then 
+    else if Sys.is_directory fn then 
 (*      let fn = Data.Text.String.chomp ~char:'/' fn in*) (* remove trailing / if exists *)
       let contents = files_in fn in
-      let dirs,files = List.partition is_directory contents
+      let dirs,files = List.partition Sys.is_directory contents
       and title = Filename.basename fn in
       let map2 = files |> List.filter is_picture |> add_entries title map in
       List.fold_left (fun map fn -> expand_list fn map) map2 dirs
