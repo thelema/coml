@@ -36,9 +36,10 @@ let _ = GtkMain.Main.init ()
 
 let pretty_print string_of l =
   "["^String.concat "; " (List.map string_of l)^"]"
-let string_of_int_list = List.print_string Int.print 
+let string_of_int_list = List.sprint Int.print 
  
-   
+let home = Sys.getenv "HOME"
+let config_file = Filename.concat home ".coml"
 let usage str = 
   Printf.printf "%s\n\
 Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
@@ -55,17 +56,23 @@ type options = { mutable fullscreen: bool;
 		 mutable wrap : bool;
 	       } with sexp
 
-let opt = { 
-  fullscreen = false; 
-  twopage = true; 
-  manga = true;
-  remove_failed = true; 
-  fit = Fit_both; 
-  zoom_enlarge = false;
-  wrap = false;
-}
+let opt = 
+  try
+    System.File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
+  with _ -> 
+    { 
+      fullscreen = false; 
+      twopage = true; 
+      manga = true;
+      remove_failed = true; 
+      fit = Fit_both; 
+      zoom_enlarge = false;
+      wrap = false;
+    }
 
-let save_opts () = print_endline (sexp_of_options opt |> Sexplib.Sexp.to_string_hum)
+let save_opts () = 
+  let opts = sexp_of_options opt |> Sexplib.Sexp.to_string_hum in
+  System.File.with_file_out config_file (fun oh -> IO.write_string oh opts)
 
 (* GTK WIDGETS *)
 
@@ -247,7 +254,7 @@ let dirs_to_cleanup = Queue.create ()
 let extract_archive file =
   let td_suff = (Printf.sprintf "coml-%d" (Random.bits ())) in
   let td = Filename.concat Filename.temp_dir_name td_suff in
-  Printf.eprintf "Extracting %s to %s\n" file td; flush stderr;
+  set_status (Printf.sprintf "Extracting %s to %s\n" file td);
   let _retval = Sys.command (extract_command file td) in
   Queue.add td dirs_to_cleanup;
 (*  if Queue.length dirs_to_cleanup > 5 then
