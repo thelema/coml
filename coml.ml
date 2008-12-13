@@ -59,12 +59,8 @@ let opt =
     File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
   with _ -> 
     { 
-      fullscreen = false; 
-      twopage = true; 
-      manga = true;
-      remove_failed = true; 
-      fit = Fit_both; 
-      zoom_enlarge = false;
+      fullscreen = false; twopage = true; manga = true;
+      remove_failed = true; fit = Fit_both; zoom_enlarge = false;
       wrap = false;
     }
 
@@ -590,20 +586,22 @@ let toggle_single_page n =
 
 let toggle_cur_twopage () = toggle_single_page !cur_node
 
-let enter_fullscreen () = 
-  opt.fullscreen <- true;
-  footer#misc#hide ();
-  window#fullscreen ();
+let handle_fullscreen () = 
+  if opt.fullscreen then begin
+    footer#misc#hide ();
+    window#fullscreen ();
+  end else begin
+    footer#misc#show ();
+    window#unfullscreen ();
+  end;
   show_spread ()
 
-let exit_fullscreen () =
-  opt.fullscreen <- false;
-  footer#misc#show ();
-  window#unfullscreen ();
-  show_spread ()
 
-let toggle_fullscreen () =
-  if opt.fullscreen then exit_fullscreen () else enter_fullscreen ()
+let toggle_fullscreen () = 
+  opt.fullscreen <- not opt.fullscreen;
+  handle_fullscreen ()
+
+let exit_fullscreen () = opt.fullscreen <- false; handle_fullscreen ()
 
 let toggle_manga () =
   opt.manga <- not opt.manga; 
@@ -729,6 +727,7 @@ let main () =
   ignore (window#event#connect#key_press ~callback:handle_key);
   ignore (window#event#connect#configure ~callback:resized);
   
+  handle_fullscreen ();
   window#show ();
   Main.main () (* calls the GTK main event loop *)
     
