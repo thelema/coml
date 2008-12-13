@@ -25,10 +25,8 @@
    
  *)
 open Batteries (* requires batteries *)
-open Standard, Printf, Data.Persistent, System
+open Printf
 open GMain
-
-
 
 TYPE_CONV_PATH "Coml"
 
@@ -58,7 +56,7 @@ type options = { mutable fullscreen: bool;
 
 let opt = 
   try
-    System.File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
+    File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
   with _ -> 
     { 
       fullscreen = false; 
@@ -72,7 +70,7 @@ let opt =
 
 let save_opts () = 
   let opts = sexp_of_options opt |> Sexplib.Sexp.to_string_hum in
-  System.File.with_file_out config_file (fun oh -> IO.write_string oh opts)
+  File.with_file_out config_file (fun oh -> IO.write_string oh opts)
 
 (* GTK WIDGETS *)
 
