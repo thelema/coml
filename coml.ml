@@ -32,19 +32,27 @@ TYPE_CONV_PATH "Coml"
 
 let _ = GtkMain.Main.init ()
 
+(* Utility functions *)
 let pretty_print string_of l =
   "["^String.concat "; " (List.map string_of l)^"]"
 let string_of_int_list = List.sprint Int.print 
- 
+
+
+(* config file parameters *)
 let home = Sys.getenv "HOME"
 let config_file = Filename.concat home ".coml"
+
+(* generate and print usage error message *)
 let usage str = 
   Printf.printf "%s\n\
 Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
   exit 1
 
+(* how to scale the picture - Width, Height, both (fit in box), or a
+   specific zoom factor *)
 type scaling = Fit_w | Fit_h | Fit_both | Zoom of float with sexp
 
+(* options record type *)
 type options = { mutable fullscreen: bool;
 		 mutable twopage: bool;
 		 mutable manga: bool;
@@ -52,8 +60,11 @@ type options = { mutable fullscreen: bool;
 		 mutable fit: scaling;
 		 mutable zoom_enlarge: bool;
 		 mutable wrap : bool;
+		 mutable debug : bool;
 	       } with sexp
 
+(* try to read options from file (using sexplib), and if anything
+   fails, use defaults *)
 let opt = 
   try
     File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
@@ -61,9 +72,10 @@ let opt =
     { 
       fullscreen = false; twopage = true; manga = true;
       remove_failed = true; fit = Fit_both; zoom_enlarge = false;
-      wrap = false;
+      wrap = false; debug = false;
     }
 
+(* write option variable back to file *)
 let save_opts () = 
   let opts = sexp_of_options opt |> Sexplib.Sexp.to_string_hum in
   File.with_file_out config_file (fun oh -> IO.write_string oh opts)
@@ -89,10 +101,14 @@ let pane = GPack.paned `VERTICAL ~packing:window#add ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
 (* GUI utility functions *)
-let set_status str = Printf.eprintf "%.2f: " (Sys.time()); prerr_endline str; note#set_label str
-let view_size () = let {Gtk.width=width; height=height} = scroller#misc#allocation in (width-2,height-2)
+let set_status str = 
+  if opt.debug then Printf.eprintf "%.2f: %s\n" (Sys.time()) str; 
+  note#set_label str
+let view_size () = 
+  let {Gtk.width=width; height=height} = scroller#misc#allocation in 
+  (width-2,height-2) (* drop a pixel on each edge *)
 
-
+(* Priorities for scheduling non-immediate tasks *)
 let preload_prio = 130 and show_prio = 115 
 and scale_prio = 140 and gen_page_prio = 120
 and spread_gc_prio = 145 and spread_clean_prio = 100
@@ -103,17 +119,26 @@ let failed_load = GdkPixbuf.create 1 1 ()
 
 let pixbuf_size pix = GdkPixbuf.get_width pix, GdkPixbuf.get_height pix
 
+(* calculate scaling factor (= zoom) for various scaling strategies *)
 let fit_wid (wt,_) (wi,_) = float wt /. float wi
 let fit_hei (_, ht) (_, hi) = float ht /. float hi
 let fit_both st si = min (fit_wid st si) (fit_hei st si)
 
+(* given a scaling factor (= zoom) and a size, calculate the scaled
+   size *)
+let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom)
+
+
+(* actually scale a pixbuf to a target size using a specific
+   interpolation method *)
 let scale_raw (width,height) ~interp pixbuf =
   let out_b = GdkPixbuf.create ~width ~height ~has_alpha:true () in
   GdkPixbuf.scale ~dest:out_b ~width ~height ~interp pixbuf;
   out_b
 
-let mul_size (wi,hi) zoom = int_of_float (float wi *. zoom), int_of_float (float hi *. zoom)
 
+(* returns the proper zoom factor for a given picture size, window
+   size and zoom strategy *)
 let find_zoom t_size p_size fit =
   let zoom = 
     match fit with 
@@ -121,7 +146,8 @@ let find_zoom t_size p_size fit =
       | Fit_h -> fit_hei t_size p_size 
       | Fit_both -> fit_both t_size p_size 
       | Zoom z -> z in
-  if opt.zoom_enlarge then zoom else min zoom 1.0
+  if opt.zoom_enlarge then zoom 
+  else min zoom 1.0 (* cap at 1.0 *)
 
 let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
   let orig = pixbuf_size pixbuf in
@@ -129,42 +155,22 @@ let scale_ar t_size ?(fit=opt.fit) ?(interp=`NEAREST) pixbuf =
   scale_raw ar_size ~interp pixbuf
 
 let size_fits (w1,h1) (w2,h2) = w1-w2 <= 2 && w1-w2 >= -10 && h1-h2 <= 2 && h1-h2>= -10
-  
-let numeric_compare s1 s2 = 
-  let s1 = String.lowercase s1 and s2 = String.lowercase s2 in
-  let l1 = String.length s1 and l2 = String.length s2 in
-  let rec pos_diff i = 
-    if i = l1 then -2 else if i = l2 then -1
-    else if s1.[i] = s2.[i] then pos_diff (i+1) else i
-  and num_end i s =
-    try 
-      if s.[i] >= '0' && s.[i] <= '9' then num_end (i+1) s else i 
-    with _ -> i-1
-  in
-  if l1 = l2 then String.compare s1 s2 
-  else let d = pos_diff 0 in
-  if d = -2 then -1 else if d = -1 then 1 else
-    let e1 = num_end d s1 and e2 = num_end d s2 in
-    if e1 = d || e2 = d then Pervasives.compare s1 s2
-(*    else if e1 <> e2 then e1 - e2 else Pervasives.compare s1 s2 *)
-    else begin
-(*      Printf.eprintf "Compare: %s & %s @ d:%d e1:%d e2:%d->" s1 s2 d e1 e2;*)
-      let n1 = Int64.of_string (String.sub s1 d (e1-d))
-      and n2 = Int64.of_string (String.sub s2 d (e2-d)) in
-(*      Printf.eprintf " %Ld & %Ld\n" n1 n2;*)
-      Int64.compare n1 n2
-    end
 
-module NumberString = struct type t = string let compare = numeric_compare end
-module NumStringSet = Set.Make(NumberString)
-module NumStringMap = Map.Make(NumberString)
+(* MAIN DATA STRUCTURES *)
 
+(* A single picture - (index, filename, size) *)
 type ifs = {idx : int; filename: string; size: (int * int) Lazy.t}
 
+(* A display unit - either one picture or two pics side-by-side *)
 type spread = One of ifs | Two of ifs * ifs
 
-type future = | Group of NumStringSet.t NumStringMap.t Lazy.t 
+(* Used to lazily read books into memory *)
+type future = | Group of Set.NumStringSet.t Map.NumStringMap.t Lazy.t 
 	      | Book of ifs list
+
+(* Each spread is put into a node, which keeps track of which spread
+   is next / previous, which book that spread is in, and if there's a
+   pre-computed pixbuf to display or scaler task running for it *)
 
 type node = { mutable next : node; 
 	      mutable prev: node;
@@ -173,6 +179,10 @@ type node = { mutable next : node;
 	      mutable scaler : Glib.Idle.id option;
 	      mutable pics : spread; 
 	    }
+
+(* Nodes are grouped into books, which have a title, page cache, and a
+   future structure for lazily-reading the book's files into nodes. *)
+
 and book = { title: string;
 	     mutable first_page : node; 
 	     mutable last_page : node; 
@@ -183,6 +193,8 @@ and book = { title: string;
 	     mutable preloader : Glib.Idle.id option;
 	   }
 
+
+(* UTILITY FUNCTIONS ON NODES *)
 let get_page cache idx fn =
   match Weak.get cache idx with 
       Some pb -> pb 
@@ -190,7 +202,7 @@ let get_page cache idx fn =
       Weak.set cache idx (Some pb);
       pb
 
-let get_idxes s = match s.pics with One i -> [i.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
+let get_idxes s = match s.pics with One i -> [i.idx] | Two (i2,i1) when opt.manga -> [i1.idx;i2.idx] | Two (i1,i2) -> [i1.idx;i2.idx]
 let first_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> min i1.idx i2.idx
 let last_idx s = match s.pics with One i -> i.idx | Two (i1,i2) -> max i1.idx i2.idx
 let get_pos s = first_idx s
@@ -200,6 +212,14 @@ let get_size s = match s.pics with One i -> get_isize i
   | Two(i1,i2) ->  merge_size (get_isize i1) (get_isize i2)
 let is_vert ifs = let w0,h0 = get_isize ifs in w0 < h0
 let get_width ifs = snd (get_isize ifs)
+let get_filenames n = match n.pics with
+    One ifs -> Filename.basename ifs.filename
+  | Two (i2, i1) when opt.manga -> 
+      Printf.sprintf "%s,%s" 
+	(Filename.basename i1.filename) (Filename.basename i2.filename)
+  | Two (i1, i2) -> 
+      Printf.sprintf "%s,%s" 
+	(Filename.basename i1.filename) (Filename.basename i2.filename)
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip); ("lzh", `Lha)]
 let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
@@ -260,10 +280,10 @@ let to_clusters filename =
   let files_in path = Sys.readdir path |> Array.to_list |> List.map (Filename.concat path) in
   (* map is title -> NumStringSet.t *)
   let add_entries t map fs = 
-    let s0 = try NumStringMap.find t map 
-             with Not_found -> NumStringSet.empty in
-    let s1 = List.fold_left (fun s fn -> NumStringSet.add fn s) s0 fs in
-    NumStringMap.add t s1 map
+    let s0 = try Map.NumStringMap.find t map 
+             with Not_found -> Set.NumStringSet.empty in
+    let s1 = List.fold_left (fun s fn -> Set.NumStringSet.add fn s) s0 fs in
+    Map.NumStringMap.add t s1 map
   in
   let rec expand_list fn ?(title=fn) map = 
 (*printf "Expanding: %s\n" fn;*)
@@ -282,7 +302,7 @@ let to_clusters filename =
       add_entries (Filename.basename fn) map [fn]
     else map
   in
-  expand_list filename NumStringMap.empty
+  expand_list filename Map.NumStringMap.empty
 
 let add_node_after n0 ?(book=n0.book) ifsl = 
   let rec n1 = {next = n1; prev=n0; book=book; 
@@ -312,7 +332,7 @@ let rec gen_nodes b () =
     {idx=i; filename=f; size=lazy(pixbuf_size (get_page c i f))} in
   let gen_ifses c l = List.mapi (fun i fn -> gen_ifs_lazy c (i+1) fn) l in
   let make_book title files = 
-    let files = NumStringSet.elements files in
+    let files = Set.NumStringSet.elements files in
     let count = List.length files in
     eprintf "Making book %s with %d pages\n" 
       title count; flush stderr;
@@ -351,7 +371,7 @@ let rec gen_nodes b () =
 	  let map = Lazy.force bks in
 (*	  let count = NumStringMap.fold (fun _ _ -> succ) map 0 in
 	  eprintf "generating %d books\n" count; flush stderr;*)
-	  NumStringMap.iter make_book map;
+	  Map.NumStringMap.iter make_book map;
 	  ( try del_node b.last_page;
 	    with Failure _ -> usage "Can't expand any books" );
 	  false
@@ -422,11 +442,10 @@ let set_node_pixbuf size n interp =
     if n == !cur_node then begin
       image#set_pixbuf pic;
       window#set_title (Printf.sprintf "Image_idx %s of %d, Book %s @ %2.2f%%" (get_idxes n |> string_of_int_list) (max_index ~cn:n ()) n.book.title (zoom *. 100.));
-      (* draw the screen *)
+      (* re-draw the screen *)
       ignore (Glib.Main.iteration true);
       let hadj = scroller#hadjustment 
       and vadj = scroller#vadjustment in
-      (*      print_scrollers hadj vadj;*)
       let hmax = hadj#upper -. hadj#page_size
       and vmax = vadj#upper -. vadj#page_size in
       if hadj#value < hmax || vadj#value < vmax then begin
@@ -436,12 +455,11 @@ let set_node_pixbuf size n interp =
 	vadj#set_value vadj#lower;
 	hadj#set_value hadj#lower;
       end;
-      (*      print_scrollers hadj vadj;
-      *)
     end
   in
   let zoom = find_zoom size (get_size n) opt.fit in
   let ar_size = mul_size (get_size n) zoom in
+  set_status (get_filenames !cur_node);
   match n.pixbuf with 
       Some pb when size_fits (pixbuf_size pb) ar_size -> display pb zoom
     | None | Some _ -> 
