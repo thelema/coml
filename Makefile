@@ -1,5 +1,5 @@
 FLAGS=-cflags -I,+lablgtk2 -lflags -I,+lablgtk2 -libs lablgtk
-OCAMLBUILD=/home/thelema/bin/ocamlcvs/bin/ocamlbuild -classic-display
+OCAMLBUILD=ocamlbuild
 
 byte:
 	$(OCAMLBUILD) $(FLAGS) coml.byte

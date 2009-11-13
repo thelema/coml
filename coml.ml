@@ -1,5 +1,3 @@
-
-
 (* coml - LablGTK-based Comic-book (CBR,CBZ) viewer 
    
    (original dispimg source) Written by Shawn Wagner (shawnw@speakeasy.org) 
@@ -28,8 +26,6 @@ open Batteries (* requires batteries *)
 open Printf
 open GMain
 
-TYPE_CONV_PATH "Coml"
-
 let _ = GtkMain.Main.init ()
 
 (* Utility functions *)
@@ -50,7 +46,7 @@ Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
 
 (* how to scale the picture - Width, Height, both (fit in box), or a
    specific zoom factor *)
-type scaling = Fit_w | Fit_h | Fit_both | Zoom of float with sexp
+type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
 (* options record type *)
 type options = { mutable fullscreen: bool;
@@ -61,13 +57,13 @@ type options = { mutable fullscreen: bool;
 		 mutable zoom_enlarge: bool;
 		 mutable wrap : bool;
 		 mutable debug : bool;
-	       } with sexp
+	       }
 
 (* try to read options from file (using sexplib), and if anything
    fails, use defaults *)
 let opt = 
   try
-    File.with_file_in config_file (fun oh -> (IO.read_string oh) |> Sexplib.Sexp.of_string |> options_of_sexp)
+    File.with_file_in config_file (fun oh -> Marshal.input oh)
   with _ -> 
     { 
       fullscreen = false; twopage = true; manga = true;
@@ -77,8 +73,7 @@ let opt =
 
 (* write option variable back to file *)
 let save_opts () = 
-  let opts = sexp_of_options opt |> Sexplib.Sexp.to_string_hum in
-  File.with_file_out config_file (fun oh -> IO.write_string oh opts)
+  File.with_file_out ~mode:[`create;`trunc] config_file (fun oh -> Marshal.output oh opt)
 
 (* GTK WIDGETS *)
 
