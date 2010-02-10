@@ -217,11 +217,11 @@ let get_filenames n = match n.pics with
 	(Filename.basename i1.filename) (Filename.basename i2.filename)
 
 let archive_suffixes = [("rar", `Rar); ("cbr", `Rar); ("zip", `Zip); ("cbz", `Zip); ("7z", `Sev_zip); ("lzh", `Lha)]
-let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("JPG", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
+let pic_suffixes = [("jpg", `Jpeg); ("jpeg", `Jpeg); ("gif", `Gif); ("png", `Png);(*any others?*) ]
   
 let fold_sufchecks fn set_acc init suf_list = 
   let folder acc (s, tag) =
-    if Filename.check_suffix fn s then set_acc tag else acc in 
+    if Filename.check_suffix (lowercase fn) s then set_acc tag else acc in 
   List.fold_left folder init suf_list
     
 let suffix_type suf_list fn = fold_sufchecks fn (fun tag -> tag) `None suf_list
