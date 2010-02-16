@@ -1,0 +1,5 @@
+* use zip library for archive access (when possible)
+
+* delay expansion of archives until close to needing them
+
+* save & load options
