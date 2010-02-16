@@ -46,6 +46,7 @@ Usage: %s [IMAGEFILE|IMAGEDIR|IMAGEARCHIVE] ...\n" str Sys.argv.(0);
 
 (* how to scale the picture - Width, Height, both (fit in box), or a
    specific zoom factor *)
+
 type scaling = Fit_w | Fit_h | Fit_both | Zoom of float
 
 (* options record type *)
