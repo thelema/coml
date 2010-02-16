@@ -720,7 +720,7 @@ let main () =
   (* BUILD BOOKS BASED ON ARGUMENT LIST *)
   let arg_list = Sys.argv |> Array.to_list |> List.tl in
   (* If no args, assume "." as argument *)
-  let arg_list = if List.length arg_list = 0 then ["."] else arg_list in
+  let arg_list = if arg_list = [] then ["."] else arg_list in
   
   begin match build_books arg_list with
       None -> usage "No books found"
