@@ -1,0 +1,29 @@
+Coml is a Comic Book viewer.  
+
+It works on page files in directories or archives (rar, zip, lha, 7z).  Each file may contain a single page or two facing pages.  Coml has a manga mode for Japanese comic books where the first page is on the right.  
+
+Its simple interface includes:
+	<left arrow>, <up arrow>, <backspace> : previous page
+	<right arrow>, <down arrow> : next page
+	<space> : magic next (scrolls if needed)
+	f, <F11> : toggle fullscreen
+	<Esc>: exit fullscreen
+	t : toggle twopage mode
+	m : toggle manga mode
+	s : zoom height and width
+	w : zoom width
+	h : zoom height
+	- : zoom out
+	+ : zoom in
+	= : zoom full (1:1)
+	w : toggle wrapping at end of comic book
+	1 : toggle twopage for the current page
+	<Page Up> : go to the previous book
+	<Page Down> : go to the next book
+	g : go to a particular page
+
+Requirements for compilation:
+	LablGTK2
+	Batteries Included
+
+Enjoy!
