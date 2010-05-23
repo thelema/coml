@@ -3,7 +3,7 @@
    (original dispimg source) Written by Shawn Wagner (shawnw@speakeasy.org) 
    and released into the public domain.
 
-    Copyright (C) 2008 Eric Norige
+    Copyright (C) 2008-2010 Eric Norige
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -84,16 +84,16 @@ let window = GWindow.window ~allow_shrink:true ~allow_grow:true ~resizable:true 
 
 let pane = GPack.paned `VERTICAL ~packing:window#add ()
 
- let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
- let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
- let image = GMisc.image ~packing:scroller#add_with_viewport ()
-   
- let footer = GPack.hbox ~packing:pane#pack2 ()
-  let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
-  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-  let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
-  let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
-  let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
+let scroller = GBin.scrolled_window ~packing:pane#add1 ~height:660 ()
+let _ = scroller#set_hpolicy `AUTOMATIC; scroller#set_vpolicy `AUTOMATIC
+let image = GMisc.image ~packing:scroller#add_with_viewport ()
+  
+let footer = GPack.hbox ~packing:pane#pack2 ()
+let file = GMisc.label ~packing:(footer#pack ~expand:true) ()
+let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+let note = GMisc.label ~packing:(footer#pack ~expand:true) ()
+let _ = GMisc.separator `VERTICAL ~packing:footer#pack ()
+let bbox = GPack.button_box `HORIZONTAL ~packing:footer#pack ~layout:`END ()
 (*let _ = let newsty = spread#misc#style#copy in newsty#set_bg [`NORMAL,`BLACK]; spread#misc#set_style newsty (* set the background black *)*)
 
 (* GUI utility functions *)
@@ -645,12 +645,30 @@ let zoom ar_func =
   opt.fit <- (ar_func cur_zoom);
   show_spread()
 
-let zoom_out () = zoom (fun ar -> Zoom (ar *. 0.95))
-and zoom_in () = zoom (fun ar -> Zoom (ar /. 0.95))
-and zoom_full () = zoom (fun _ -> Zoom 1.)
-and zoom_height () = zoom (fun _ -> Fit_h)
-and zoom_width () = zoom (fun _ -> Fit_w)
-and zoom_both () = zoom (fun _ -> Fit_both)
+let zoom_out () =   
+  scroller#set_hpolicy `AUTOMATIC;
+  scroller#set_vpolicy `AUTOMATIC;
+  zoom (fun ar -> Zoom (ar *. 0.95))
+and zoom_in () = 
+  scroller#set_hpolicy `AUTOMATIC;
+  scroller#set_vpolicy `AUTOMATIC;
+  zoom (fun ar -> Zoom (ar /. 0.95))
+and zoom_full () =        
+  scroller#set_hpolicy `AUTOMATIC;
+  scroller#set_vpolicy `AUTOMATIC;
+  zoom (fun _ -> Zoom 1.)
+and zoom_height () = 
+  scroller#set_hpolicy `NEVER;
+  scroller#set_vpolicy `AUTOMATIC;
+  zoom (fun _ -> Fit_h)
+and zoom_width () = 
+  scroller#set_hpolicy `AUTOMATIC;
+  scroller#set_vpolicy `NEVER;
+  zoom (fun _ -> Fit_w)
+and zoom_both () = 
+  scroller#set_hpolicy `NEVER;
+  scroller#set_vpolicy `NEVER;
+  zoom (fun _ -> Fit_both)
 
 
 (* gets set to first and last books when they're built *)
