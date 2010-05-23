@@ -1,1 +1,1 @@
-<*>: unix, pkg_batteries, pkg_inotify, debug, annot
+<*>: unix, pkg_batteries, pkg_inotify, debug, annot, pkg_threads
